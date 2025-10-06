@@ -40,7 +40,7 @@ class DinoV2ClassifierSlice(BasicClassifier):
             rotary_positional_encoding=None,
             optimizer_kwargs={'lr': 1e-6, 'weight_decay': 1e-2},
             model_size = 's', # [s, b, l, 'g']
-            use_registers = False,
+            use_registers = True,
             use_bottleneck=False,
             use_slice_pos_emb=False,
             enable_linear = True,

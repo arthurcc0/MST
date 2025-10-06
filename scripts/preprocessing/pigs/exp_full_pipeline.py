@@ -8,21 +8,9 @@ import torch
 import os
 from pathlib import Path
 import nibabel as nib
-from bpe_calculations import calculate_bpe_mask
+import SimpleITK as sitk
+from bpe_calculations import calculate_bpe_mask, preprocess_fgt_mask, analyze_fgt_slices, preprocess_breast_mask
 from normalize import normalize_mean_std
-
-def shape_correction(img, target_shape):
-    """
-    Find the correct transpose order to match target_shape
-    """
-    # Generate all possible axis permutations
-    for axes in permutations(range(len(img.shape))):
-        # Apply transpose and check if resulting shape matches target
-        transposed_shape = tuple(img.shape[i] for i in axes)
-        if transposed_shape == target_shape:
-            return np.transpose(img, axes)
-    return img
-        
 
 def calculate_relative_enhancement(pre_img, post_img, mask):
     """
@@ -333,9 +321,9 @@ def debug_bpe_calculation(pre_slice, post_slice, mask_slice, enhancement_thresho
         
         # Check if methods agree
         if np.array_equal(enhanced_mask, bpe_mask_alt):
-            print("✓ Both methods produce identical enhanced masks")
+            print(" Both methods produce identical enhanced masks")
         else:
-            print("⚠ Methods produce different enhanced masks")
+            print(" Methods produce different enhanced masks")
             
     return enhanced_mask, enhancement_map
 
@@ -360,48 +348,36 @@ def process_bpe_pipeline_with_debug(pre_image_path, post_image_path, fgt_mask_pa
         print("Attempting to match orientations...")
         
         if len(fgt_mask.shape) == 4 and len(pre_img.shape) == 3:
-            for channel in range(fgt_mask.shape[0]):
-                channel_mask = fgt_mask[channel]
-                corrected_mask = shape_correction(channel_mask, pre_img.shape)
-                if corrected_mask.shape == pre_img.shape:
-                    fgt_mask = corrected_mask
-                    print(f"Successfully matched using channel {channel}")
-                    print(f"FGT mask shape after matching: {fgt_mask.shape}")
-                    break
-        else:
-            fgt_mask = shape_correction(fgt_mask, pre_img.shape)
-            print(f"FGT mask shape after correction: {fgt_mask.shape}")
-    
-    pre_img, _, _ = normalize_mean_std(pre_img)
-    post_img, _, _ = normalize_mean_std(post_img)
+            # Use preprocess_fgt_mask for proper handling
+            fgt_mask, _ = preprocess_fgt_mask(fgt_mask_path)
+            print(f"FGT mask shape after preprocessing: {fgt_mask.shape}")
+        
+        if fgt_mask.shape != pre_img.shape:
+            print("ERROR: FGT mask shape still doesn't match after preprocessing")
+            return None
     
     if breast_mask_path is not None:
-        breast_mask = np.load(breast_mask_path)
-        print(f"Breast mask shape: {breast_mask.shape}")
+        breast_mask = preprocess_breast_mask(breast_mask_path)
+        print(f"Breast mask shape after preprocessing: {breast_mask.shape}")
         
-        if len(breast_mask.shape) == 4:
-            breast_mask = breast_mask[0]  # Use first channel
-            print(f"Using first channel, breast mask shape: {breast_mask.shape}")
-        
+        # Ensure breast mask matches image shape
         if breast_mask.shape != pre_img.shape:
-            print("WARNING: Breast mask shape mismatch, attempting correction...")
-            breast_mask = shape_correction(breast_mask, pre_img.shape)
-            print(f"Breast mask shape after correction: {breast_mask.shape}")
+            print("ERROR: Breast mask shape still doesn't match after preprocessing")
+            return None
         
-        pre_img = pre_img * breast_mask
-        post_img = post_img * breast_mask
-        fgt_mask = fgt_mask * breast_mask
-        print("Applied breast mask")
+    pre_img = pre_img * breast_mask
+    post_img = post_img * breast_mask
+    #fgt_mask = fgt_mask * breast_mask
+    
+    print("Applied breast mask")
     
     enhanced_mask = calculate_bpe_mask(pre_img, post_img, fgt_mask)
+    
     
     if enhanced_mask is None:
         print("ERROR: Failed to calculate enhanced area mask")
         return None
 
-    plot_bpe_grid(pre_img, post_img, fgt_mask, 
-                     breast_mask if 'breast_mask' in locals() else None,
-                     save_path=f"bpe_grid_comparison_threshold_1.png")
     print(enhanced_mask.shape)
     results = {
         'enhanced_mask': enhanced_mask,
@@ -419,7 +395,8 @@ if __name__ == "__main__":
     post_image_path = r"\\rad-maid-004\D\Duke-Cancer_MRI\preprocessed-v1\data\Breast_MRI_001\post_1.npy" 
     fgt_mask_path = r"D:\Users\UFPB\gabriel ayres\3D-Breast-FGT-and-Blood-Vessel-Segmentation\duke_output\fgt\Breast_MRI_001.npy"
     breast_mask_path = r"D:\Users\UFPB\gabriel ayres\3D-Breast-FGT-and-Blood-Vessel-Segmentation\duke_output\breast\Breast_MRI_001.npy"
-    
+   
+
     # Process with debug pipeline
     results = process_bpe_pipeline_with_debug(
         pre_image_path=pre_image_path,
@@ -428,14 +405,12 @@ if __name__ == "__main__":
         breast_mask_path=breast_mask_path,
         visualize_debug=True
     )
-    # INSTANT DRAMATIC TUMOR VISUALIZATION
     bpe_mask = results['enhanced_mask']
     pre_img = results['pre_img']
     post_img = results['post_img']
     mask = results['mask']
     print("="*12)
-    
-    post_img = post_img + bpe_mask
+   
     # Find best slice (most enhancement)
     if len(bpe_mask.shape) == 3:
         bpe_counts = np.sum(bpe_mask, axis=(0,1))
@@ -469,24 +444,53 @@ if __name__ == "__main__":
     plt.show()
 
     
-    # Save BPE mask as NIfTI if results are valid
     if results is not None and 'enhanced_mask' in results:
-        # Save enhanced mask as NIfTI
         import nibabel as nib
         
-        # Create basic affine matrix
         voxel_spacing = (0.7, 0.7, 3.0)
         affine = np.eye(4)
         affine[0, 0] = voxel_spacing[0]
         affine[1, 1] = voxel_spacing[1] 
         affine[2, 2] = voxel_spacing[2]
         
-        enhanced_mask_3d = results['enhanced_mask'].astype(np.uint16)
+
+        pre_volume, _, _ = normalize_mean_std(pre_img)
+        post_volume, _, _ = normalize_mean_std(post_img)
         
-        nii_img = nib.Nifti1Image(post_img.astype(np.uint16), affine)
-        output_path = f"bpe_enhanced_mask.nii.gz"
-        nib.save(nii_img, output_path)
-        print(f"Enhanced mask saved as NIfTI: {output_path}")
+        nii_mask = nib.Nifti1Image(bpe_mask, affine)
+        nib.save(nii_mask, "bpe_enhanced_mask.nii.gz")
+        print(f"Enhanced mask saved as: bpe_enhanced_mask.nii.gz")
         
-        np.save(f"bpe_enhanced_mask.npy", results['enhanced_mask'])
-        print(f"Enhanced mask saved as numpy: bpe_enhanced_mask.npy")
+        nii_pre = nib.Nifti1Image(pre_img, affine)
+        nib.save(nii_pre, "pre_contrast_volume.nii.gz")
+        print(f"Pre-contrast volume saved as: pre_contrast_volume.nii.gz")
+        
+        nii_post = nib.Nifti1Image(post_img, affine)
+        nib.save(nii_post, "post_contrast_volume.nii.gz")
+        print(f"Post-contrast volume saved as: post_contrast_volume.nii.gz")
+        
+        nii_fgt = nib.Nifti1Image(mask, affine)
+        nib.save(nii_fgt, "fgt_mask_volume.nii.gz")
+        print(f"FGT mask volume saved as: fgt_mask_volume.nii.gz")
+        
+        final_volume = post_volume * bpe_mask * mask
+        nii_final = nib.Nifti1Image(final_volume, affine)
+        nib.save(nii_final, "final_volume.nii.gz")
+        print(f"Final volume saved as: final_volume.nii.gz")
+        
+        np.save("bpe_enhanced_mask.npy", bpe_mask)
+        np.save("pre_contrast_volume.npy", pre_volume)
+        np.save("post_contrast_volume.npy", post_volume)
+        np.save("fgt_mask_volume.npy", mask)
+        np.save("final_volume.npy", final_volume)
+        print(f"All volumes also saved as .npy files")
+        
+        print(f"\n=== SAVED VOLUMES SUMMARY ===")
+        print(f"1. bpe_enhanced_mask.nii.gz - Binary BPE mask")
+        print(f"2. pre_contrast_volume.nii.gz - Original pre-contrast")
+        print(f"3. post_contrast_volume.nii.gz - Original post-contrast")
+        print(f"4. fgt_mask_volume.nii.gz - FGT tissue mask")
+        print(f"5. final_volume.nii.gz - Post + BPE enhancement")
+        print(f"All volumes: {final_volume.shape} voxels")
+
+        

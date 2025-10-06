@@ -3,12 +3,17 @@ from pathlib import Path
 from datetime import datetime
 import torch 
 import transformers
+import sys
 print(f"PyTorch version: {torch.__version__}")
 print(f"Transformers version: {transformers.__version__}")
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.callbacks import LearningRateMonitor
 
+# Ensure project root on sys.path (for 'mst' package imports)
+project_root = Path(__file__).parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 from mst.data.datasets.dataset_3d_duke import DUKE_Dataset3D
 from mst.data.datasets.dataset_3d_lidc import LIDC_Dataset3D
@@ -43,7 +48,7 @@ def get_model(name, **kwargs):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, required=True, choices=['DUKE', 'LIDC', 'MRNet'])
-    parser.add_argument('--model', type=str, required=True, choices=['ResNet', 'ResNetSliceTrans', 'DinoV2ClassifierSlice', 'DinoV3ClassifierSlice'])
+    parser.add_argument('--model', '--model_name', dest='model', type=str, required=True, choices=['ResNet', 'ResNetSliceTrans', 'DinoV2ClassifierSlice', 'DinoV3ClassifierSlice'])
     parser.add_argument('--path_root_output', type=str, default='./runs', help="Root output path")
     args = parser.parse_args()
 
@@ -74,7 +79,7 @@ if __name__ == "__main__":
         batch_size=batch_size, 
         pin_memory=True,
         weights=weights,
-        num_workers=24,
+        num_workers=0,
         num_train_samples=min(len(ds_train), 2000)
     )
 

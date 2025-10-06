@@ -10,7 +10,7 @@ from .augmentations.augmentations_3d import ImageOrSubjectToTensor, RescaleInten
 
 
 class DUKE_Dataset3D(data.Dataset):
-    #PATH_ROOT = Path(__file__).parent.parent.parent.parent / 'dummy_data' / 'side_v3'
+    PATH_ROOT = Path(__file__).parent.parent.parent.parent / 'dummy_data' / 'side_v3'
     #PATH_ROOT = Path('/vast/projects/bbruno/breast-imaging/gabriel/vit-gabriel')/'side_v3'
     LABEL = 'Malignant'
 
@@ -32,6 +32,7 @@ class DUKE_Dataset3D(data.Dataset):
     ):
         self.path_root = self.PATH_ROOT if path_root is None else Path(path_root)
         self.path_h5 = self.path_root / 'data_compressed.h5'
+        self.masks = self.path_root / 'masks_compressed.h5'
         self.split = split
 
         if transform is None:
@@ -93,13 +94,53 @@ class DUKE_Dataset3D(data.Dataset):
             patient_group = f[patient_id]
             data = patient_group[scan_name][()]
             affine = patient_group[f"{scan_name}_affine"][()]
+            # Try to read post-contrast volume for final computation
+            post = patient_group['post_1'][()] if 'post_1' in patient_group else None
+            # Try to read pre-contrast volume for on-the-fly BPE
+            pre = patient_group['pre'][()] if 'pre' in patient_group else None
 
+        # Optionally compute final volume using masks if available
+        final_img = None
+        try:
+            if hasattr(self, 'masks') and Path(self.masks).exists():
+                with h5py.File(self.masks, 'r') as fm:
+                    if patient_id in fm:
+                        gm = fm[patient_id]
+                        # Resolve mask keys
+                        fgt_key = 'fgt' if 'fgt' in gm else ('FGT' if 'FGT' in gm else ('fgt_mask' if 'fgt_mask' in gm else None))
+                        bpe_key = 'bpe_mask' if 'bpe_mask' in gm else ('bpe' if 'bpe' in gm else None)
+                        breast_key = 'breast' if 'breast' in gm else ('breast_mask' if 'breast_mask' in gm else None)
+
+                        fgt = (gm[fgt_key][()] > 0).astype(np.float32) if fgt_key else None
+                        bpe = (gm[bpe_key][()] > 0).astype(np.float32) if bpe_key else None
+                        breast = (gm[breast_key][()] > 0).astype(np.float32) if breast_key else None
+
+                        # Base for final computation is post if available; else fall back to subtraction image
+                        base = post.astype(np.float32) if post is not None else data.astype(np.float32)
+                        final_vol = base
+                        if bpe is not None:
+                            final_vol = final_vol * bpe
+                        if fgt is not None:
+                            final_vol = final_vol * fgt
+                        if breast is not None:
+                            final_vol = final_vol * breast
+
+                        final_img = tio.ScalarImage(tensor=final_vol.astype(np.float32), affine=affine)
+        except Exception:
+            # Fail silently if masks or keys are unavailable; we still return 'source'
+            final_img = None
+ 
         # Ensure data is in a format torchio understands (e.g., float32)
         img = tio.ScalarImage(tensor=data.astype(np.float32), affine=affine)
-
+ 
         img = self.transform(img)
-
-        return {'uid': uid, 'source': img, 'target': target}
+        if final_img is not None:
+            final_img = self.transform(final_img)
+ 
+        out = {'uid': uid, 'source': img, 'target': target}
+        if final_img is not None:
+            out['final'] = final_img
+        return out
 
 
     @classmethod

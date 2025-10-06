@@ -169,7 +169,7 @@ def run_pred(model, batch, save_attn=False, use_softmax=True, use_tta=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--run_dir', default='./runs', type=str)
-    parser.add_argument('--run_folder', default='DUKE/DinoV3ClassifierSlice', type=str)
+    parser.add_argument('--run_folder', default=None, type=str)
     parser.add_argument('--output_dir', default='./', type=str)
     parser.add_argument('--get_attention', action='store_true', help='Flag to get attention')
     parser.add_argument('--get_segmentation', action='store_true', help='Flag to get attention')
@@ -187,7 +187,7 @@ if __name__ == "__main__":
 
     #------------ Settings/Defaults ----------------
     path_run = Path(args.run_dir)/run_folder
-    results_folder = 'results_tta'if use_tta else 'results-side-v3'
+    results_folder = 'results_tta'if use_tta else 'results-registers'
     path_out = Path(args.output_dir)/results_folder/run_folder
     path_out.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda") 
