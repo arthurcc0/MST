@@ -25,6 +25,16 @@ class GetLast(nn.Module):
 class ResNet(BasicClassifier):
     def __init__(self, in_ch, out_ch, spatial_dims=3, model=34, pretrained=False, kwargs_resnet={}, **kwargs):
         emb_ch = kwargs.pop('emb_ch', out_ch)
+#        kwargs.pop('model', None)
+#        kwargs.pop('save_attn', None) # Remove save_attn if present
+#        kwargs.pop('model_size', None) # Remove save_attn if present
+#        kwargs.pop('use_registers', None) # Remove use_registers if present
+#        kwargs.pop('use_bottleneck', None) # Remove use_registers if present
+#        kwargs.pop('use_slice_pos_emb', None)
+#        kwargs.pop('enable_linear', None) # Remove enable_linear if present
+#        kwargs.pop('enable_trans', None)
+#        kwargs.pop('slice_fusion', None)
+#        kwargs.pop('freeze', None) # Remove freeze if present
         super().__init__(in_ch, out_ch, spatial_dims, **kwargs)
         
         self.attention_maps = []

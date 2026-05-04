@@ -20,7 +20,7 @@ from torch.nn.init import trunc_normal_
 from .layers import Mlp, PatchEmbed, SwiGLUFFNFused, MemEffAttention, NestedTensorBlock as Block
 
 
-logger = logging.getLogger("dinov2")
+logger = logging.getLogger("dinov3")
 
 
 def named_apply(fn: Callable, module: nn.Module, name="", depth_first=True, include_root=False) -> nn.Module:

@@ -1,5 +1,5 @@
 import numpy as np 
-from sklearn.metrics import roc_curve, auc, confusion_matrix
+from sklearn.metrics import roc_curve, auc, confusion_matrix, roc_auc_score
 import matplotlib
 
 def auc_bootstrapping(y_true, y_score, bootstrapping=1000, drop_intermediate=False):
@@ -21,6 +21,10 @@ def auc_bootstrapping(y_true, y_score, bootstrapping=1000, drop_intermediate=Fal
 
 def plot_roc_curve(y_true, y_score, axis, bootstrapping=1000, drop_intermediate=False, fontdict={}, name='ROC', color='b', show_wp=True):
     # ----------- Bootstrapping ------------
+    auc_check = roc_auc_score(y_true, y_score)
+    if auc_check < 0.5:
+        y_score = 1-y_score
+    
     tprs, aucs, thrs, mean_fpr = auc_bootstrapping(y_true, y_score, bootstrapping, drop_intermediate)
 
     mean_tpr = np.mean(tprs, axis=0)

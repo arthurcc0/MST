@@ -4,21 +4,40 @@ import pandas as pd
 
 from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 
-path_root = Path('/home/gustav/Coscine_Public/Duke-Breast-Cancer-MRI/')
-path_root_in = path_root/'download'
-path_root_out = path_root/'preprocessed_crop'
+import argparse
 
-df = pd.read_excel(path_root_in/'Clinical_and_Other_Features.xlsx', header=[0, 1, 2])
-df = df[df[df.columns[38]] != 'NC'] # check if cancer is bilateral=1, unilateral=0 or NC 
-df = df[[df.columns[0], df.columns[36],  df.columns[38]]] # Only pick relevant columns: Patient ID, Tumor Side, Bilateral
-df.columns = ['PatientID', 'Location', 'Bilateral']  # Simplify columns as: Patient ID, Tumor Side
+parser = argparse.ArgumentParser()
+parser.add_argument('--path_data', type=str, default=r'\\rad-maid-004\D\Duke-Cancer_MRI')
+parser.add_argument('--path_preprocessed', type=str, default=r'\\rad-maid-004\D\Duke-Cancer_MRI\preprocessed_crop_n4bc_plhe_fast_full-a')
+args = parser.parse_args()
+
+path_root_in = Path(args.path_data)
+path_root_out = Path(args.path_preprocessed)
+
+# Load clinical data
+df_clinical = pd.read_excel(path_root_in/'Clinical_and_Other_Features.xlsx', header=[0, 1, 2])
+df_clinical = df_clinical[df_clinical[df_clinical.columns[38]] != 'NC']
+df_clinical = df_clinical[[df_clinical.columns[0], df_clinical.columns[36], df_clinical.columns[38]]]
+df_clinical.columns = ['PatientID', 'Location', 'Bilateral']
+df_clinical['PatientID'] = df_clinical['PatientID'].str.split('_').str[2].astype(int)
+
+# Load file mapping to check for segmentations
+df_mapping = pd.read_csv(path_root_in/'Radiology_and_Pathology_Features.csv')
+segmentation_patients = df_mapping[df_mapping['SequenceName'] == 'Segmentation']['PatientID'].unique()
+
 dfs = []
 for side in ["left", 'right']:
-    dfs.append(pd.DataFrame({
-        'PatientID': df["PatientID"].str.split('_').str[2],
-        'UID': df["PatientID"].str.split('_').str[2] + f"_{side}",
-        'Malignant':df[["Location", "Bilateral"]].apply(lambda ds: int((ds[0] == side[0].upper()) | (ds[1]==1)) , axis=1) } ) )
-df = pd.concat(dfs,  ignore_index=True)
+    df_side = pd.DataFrame({
+        'PatientID': df_clinical["PatientID"],
+        'UID': df_clinical["PatientID"].astype(str).str.zfill(3) + f"_{side}",
+        'Malignant': df_clinical[["Location", "Bilateral"]].apply(lambda ds: int((ds[0] == side[0].upper()) | (ds[1] == 1)), axis=1)
+    })
+    dfs.append(df_side)
+
+df = pd.concat(dfs, ignore_index=True)
+
+# Add has_segmentation flag
+df['has_segmentation'] = df['PatientID'].isin(segmentation_patients)
 
 df = df.reset_index(drop=True)
 splits = []

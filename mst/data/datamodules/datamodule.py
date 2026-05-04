@@ -54,7 +54,8 @@ class DataModule(pl.LightningDataModule):
                 num_samples = len(self.ds_train) if self.num_train_samples is None else self.num_train_samples
                 sampler = RandomSampler(self.ds_train, num_samples=num_samples, replacement=False, generator=generator)
             return DataLoader(self.ds_train, batch_size=self.batch_size, num_workers=self.num_workers, 
-                            sampler=sampler, generator=generator, drop_last=True, pin_memory=self.pin_memory)
+                            sampler=sampler, generator=generator, drop_last=True, pin_memory=self.pin_memory,
+                            persistent_workers=self.num_workers > 0)
         
         raise AssertionError("A training set was not initialized.")
 
@@ -63,7 +64,8 @@ class DataModule(pl.LightningDataModule):
         generator.manual_seed(self.seed)
         if self.ds_val is not None:
             return DataLoader(self.ds_val, batch_size=self.batch_size_val, num_workers=self.num_workers, shuffle=False, 
-                                generator=generator, drop_last=False, pin_memory=self.pin_memory)
+                                generator=generator, drop_last=False, pin_memory=self.pin_memory,
+                                persistent_workers=self.num_workers > 0)
         
         raise AssertionError("A validation set was not initialized.")
 
@@ -73,7 +75,8 @@ class DataModule(pl.LightningDataModule):
         generator.manual_seed(self.seed)
         if self.ds_test is not None:
             return DataLoader(self.ds_test, batch_size=self.batch_size_test, num_workers=self.num_workers, shuffle=False, 
-                            generator = generator, drop_last=False, pin_memory=self.pin_memory)
+                            generator = generator, drop_last=False, pin_memory=self.pin_memory,
+                            persistent_workers=self.num_workers > 0)
        
         raise AssertionError("A test test set was not initialized.")
 

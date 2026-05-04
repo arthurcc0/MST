@@ -40,28 +40,18 @@ def minmax_norm(x, max=1, dim=None, smooth_nr=0, smooth_dr=0):
 
 
 def tensor2image(tensor, batch=0):
-    """Transform tensor into shape of multiple 2D RGB/gray images. 
-        Keep 2D images as they are (gray or RGB).  
-        For 3D images, pick 'batch' and use depth and interleaved channels as batch (multiple gray images). 
+    """Transform a tensor into multiple 2D images.
 
     Args:
-        tensor (torch.Tensor): Image of shape [B, C, H, W] or [B, C, D, H, W]
+        tensor (torch.Tensor): Can be 3D volume of shape [B, C, D, W, H] or 2D of shape [B, C, H, W]
+        batch (int, optional): Batch to use if input is 3D. Defaults to 0.
 
     Returns:
         torch.Tensor: Image of shape [B, C, H, W] or [DxC,1, H, W]  (Compatible with torchvision.utils.save_image)
     """
-    if tensor.ndim < 5:
-        return tensor
-    else:
-        # For 5D tensors [B, C, D, H, W], extract batch and reshape to [D, C, H, W]
-        tensor_batch = tensor[batch]  # [C, D, H, W]
-        # Move depth dimension to batch dimension: [D, C, H, W]
-        tensor_reshaped = tensor_batch.permute(1, 0, 2, 3)  # [D, C, H, W]
-        # Add singleton dimension for compatibility: [D, 1, H, W] if C=1
-        if tensor_reshaped.shape[1] == 1:
-            return tensor_reshaped
-        else:
-            return tensor_reshaped.reshape(-1, 1, *tensor.shape[-2:])  # [D*C, 1, H, W]
+    # Input can be [B, C, D, H, W] or [B, C, H, W]
+    # Select the batch item
+    return (tensor if tensor.ndim<5 else torch.swapaxes(tensor[batch], 0, 1).reshape(-1, *tensor.shape[-2:])[:,None])
 
 
 def tensor_mask2image(tensor, mask_hot, batch=0, alpha=0.25, colors=None, exclude_chs=[], exclude_classes=[0]):
@@ -105,13 +95,15 @@ def tensor_cam2image(tensor, cam, batch=0, alpha=0.5, color_map=get_cmap('jet'))
     Returns:
         torch.Tensor: Tensor of 2D-RGB images with transparent mask on each. For 3D will be [CxD, 3, H, W] for 2D will be [B, 3, H, W] 
     """
+    # 1. Process the image tensor
+    # Input tensor shape: [B, C, D, H, W], e.g., [1, 2, 32, 224, 224]
+    # tensor2image combines C and D: [B, C, D, H, W] -> [DxC, 1, H, W]
     img = tensor2image(tensor, batch) #  -> [B, C, H, W]
     img = torch.cat([img for _ in range(3)], dim=1) if img.shape[1]!=3 else img # Ensure RGB  [B, 3, H, W] 
     cam_img = tensor2image(cam, batch) #  -> [B, 1, H, W]
     cam_img = cam_img[:,0].cpu().numpy() # -> [B, H, W]
     cam_img = torch.tensor(color_map(cam_img)) # -> [B, H, W, 4], color_map expects input to be [0.0, 1.0]
-    cam_img = torch.moveaxis(cam_img, -1, 1)[:, :3] # -> [B, 3, H, W]
+    cam_img = torch.moveaxis(cam_img, -1, 1)[:, :3].to(img.device) # -> [B, 3, H, W]
 
     overlay = (1-alpha)*img + alpha*cam_img
-
     return overlay

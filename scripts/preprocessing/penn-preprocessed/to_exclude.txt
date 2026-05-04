@@ -1,0 +1,83 @@
+11826995_left - 
+11826995_right - 
+13402884_left - 
+13402884_right - 
+14623379_left - 
+14623379_right - 
+15606923_left - 
+15606923_right -
+20746580_left - 
+20746580_right -
+24291205_left - not implant? maybe big mass?
+25822545_left - bad crop
+25822545_right - bad crop
+27976070_left - bad crop
+28596160_left - maybe implant?
+28596160_right - maybe implant?
+29818960_left - bad crop
+30793578_left - 
+30793578_right - 
+33705880_left - 
+33705880_right -
+35521895_left - bad crop
+37704841_left - bad bias field correction?
+37704841_right - bad bias field correction?
+39987631_right - bad crop
+42353517_left - bad crop
+42425835_left - bad crop
+43407295_left - bad crop
+43407295_right - bad crop
+46023487_left - bad crop
+46023487_right - bad crop
+49127606_left - bad crop
+51127450_left -
+51127450_right -
+55005542_left - 
+55005542_right - 
+55061678_left - 
+56186735_left - bad crop
+56186735_right - bad crop
+56799622_left - bad bias field correction?
+56799622_right - bad bias field correction?
+57781042_left - 
+57781042_right - 
+63176083_left - bad crop
+63176083_right - bad crop
+65694802_left - maybe implant?
+65694802_right - maybe implant?
+66467057_left - 
+66467057_right - 
+66964637_left - 
+66964637_right - 
+68968214_left - 
+68968214_right - 
+70468245_left - 
+70468245_right - 
+71057022_left - bad crop
+71057022_right - bad crop
+71311238_left - bad crop
+73946832_left - artifact
+73946832_right - artifact
+80577896_left - 
+80577896_right - 
+80728907_left - should be implant, but has texture?
+80728907_right - should be implant, but has texture?
+80972863_left -
+82567022_left - bad crop
+82567022_right - bad crop
+84036684_left - bad crop
+84036684_right - bad crop
+85164084_left - 
+85164084_right - 
+85956582_left - bad crop
+86532377_left - bad crop
+86532377_right - bad crop
+86655076_left - bad bias field correction?
+87076626_left - 
+87076626_right - 
+88178163_left - bad processing
+88178163_right - bad processing
+88201414_left - 
+88201414_right - 
+88299971_left - 
+88299971_right - 

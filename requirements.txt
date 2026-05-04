@@ -1,0 +1,12 @@
+pandas
+python-dotenv
+huggingface_hub
+numpy
+tqdm
+torchio
+SimpleITK
+matplotlib
+natsort
+torch
+nibabel
+scipy
