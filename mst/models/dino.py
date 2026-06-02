@@ -72,10 +72,23 @@ class DinoClassifierSlice(BasicClassifier):
             enable_trans = True, # Deprecated 
             slice_fusion='transformer',
             freeze=False,
+            encoder_lr=None,
             **kwargs
         ):
         kwargs.pop('paired_sampling', None)
-        super().__init__(in_ch, out_ch, spatial_dims=spatial_dims, optimizer_kwargs=optimizer_kwargs)
+        kwargs.pop('freeze_backbone', None)
+        kwargs.pop('unfreeze_encoder_blocks', None)
+        kwargs.pop('learning_rate', None)
+        kwargs.pop('class_weight', None)
+        loss_kwargs = kwargs.pop('loss_kwargs', {})
+        super().__init__(
+            in_ch,
+            out_ch,
+            spatial_dims=spatial_dims,
+            optimizer_kwargs=optimizer_kwargs,
+            loss_kwargs=loss_kwargs,
+        )
+        self.encoder_lr = encoder_lr
         self.save_attn = save_attn
         self.attention_maps = []
         self.attention_maps_slice = []
@@ -145,10 +158,52 @@ class DinoClassifierSlice(BasicClassifier):
 
         self.linear = nn.Linear(emb_ch, out_ch) if enable_linear else nn.Identity()
 
+    def unfreeze_encoder_last_blocks(self, n_blocks: int) -> int:
+        """Unfreeze the last ``n_blocks`` DINOv2 ViT blocks (MST + classifier stay trainable)."""
+        if n_blocks <= 0:
+            return 0
+        if self.model_version != 'v2' or not hasattr(self.encoder, 'blocks'):
+            print(
+                "Warning: partial encoder unfreeze is only implemented for DINOv2 hub ViT "
+                f"(model_version={self.model_version!r})."
+            )
+            return 0
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+        blocks = self.encoder.blocks[-n_blocks:]
+        for block in blocks:
+            for param in block.parameters():
+                param.requires_grad = True
+        return len(blocks)
 
+    def configure_optimizers(self):
+        encoder_params = []
+        head_params = []
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            if name.startswith('encoder.'):
+                encoder_params.append(param)
+            else:
+                head_params.append(param)
 
-        
+        opt_kwargs = dict(self.optimizer_kwargs)
+        head_lr = float(opt_kwargs.pop('lr', 1e-6))
+        enc_lr = float(self.encoder_lr) if self.encoder_lr is not None else head_lr * 0.1
 
+        if encoder_params and head_params:
+            param_groups = [
+                {'params': encoder_params, 'lr': enc_lr},
+                {'params': head_params, 'lr': head_lr},
+            ]
+        else:
+            param_groups = [p for p in self.parameters() if p.requires_grad]
+
+        optimizer = self.optimizer(param_groups, **opt_kwargs)
+        if self.lr_scheduler is not None:
+            lr_scheduler = self.lr_scheduler(optimizer, **self.lr_scheduler_kwargs)
+            return [optimizer], [{'scheduler': lr_scheduler, 'interval': 'step', 'frequency': 1}]
+        return optimizer
 
     def forward(self, source, save_attn=False, src_key_padding_mask=None, **kwargs):   
 

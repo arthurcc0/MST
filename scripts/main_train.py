@@ -14,8 +14,11 @@ if project_root not in sys.path:
 import argparse
 from pathlib import Path
 from datetime import datetime
+import yaml
+import numpy as np
 import wandb 
 import torch 
+from sklearn.utils.class_weight import compute_class_weight
 from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
@@ -30,6 +33,32 @@ from mst.data.datamodules import DataModule
 from mst.models.resnet import ResNet, ResNetSliceTrans
 from mst.models.dino import DinoClassifierSlice, DinoClassifierPaired, DinoTxtClassifier
 
+
+def _train_malignant_labels(dataset, label_col: str = 'Malignant') -> np.ndarray:
+    """Integer class labels from a dataset's underlying train split table."""
+    if not hasattr(dataset, 'df'):
+        raise TypeError(f"Cannot read labels from {type(dataset).__name__} (no .df attribute).")
+    return dataset.df[label_col].astype(int).values
+
+
+def _balanced_cross_entropy_weights(
+    labels: np.ndarray,
+    n_classes: int = 2,
+) -> torch.Tensor:
+    """sklearn 'balanced' weights indexed by class id (0 .. n_classes-1)."""
+    labels = np.asarray(labels, dtype=int)
+    present = np.unique(labels)
+    if len(present) < 2:
+        print(
+            f"Warning: training set has a single class {present.tolist()}; "
+            "using uniform CrossEntropyLoss weights."
+        )
+        return torch.ones(n_classes, dtype=torch.float32)
+    raw = compute_class_weight(class_weight='balanced', classes=present, y=labels)
+    weight = torch.ones(n_classes, dtype=torch.float32)
+    for cls, w in zip(present, raw):
+        weight[int(cls)] = float(w)
+    return weight
 
 
 def get_model(name, **kwargs):
@@ -63,6 +92,7 @@ if __name__ == "__main__":
     parser.add_argument('--dataset', type=str, default='DUKE', choices=['DUKE', 'LIDC', 'MRNet', 'PENN'])
     parser.add_argument('--model_name', type=str, default='DinoClassifierSlice', choices=['ResNet', 'ResNetSliceTrans', 'DinoClassifierSlice', 'DinoClassifierPaired', 'DinoTxtClassifier'])
     parser.add_argument('--model_version', type=str, default='v2', choices=['v2', 'v3'], help='DINO model version.')
+    parser.add_argument('--use_registers', type=lambda x: str(x).lower() == 'true', nargs='?', const=True, default=False,help='Load DINOv2 backbone with 4 register tokens (Darcet et al., 2023).')
     parser.add_argument('--path_root_output', type=str, default='./runs', help="Root output path")
     parser.add_argument('--only_malignants', action='store_true', default=False, help="Use only malignant samples for PENN dataset")
     parser.add_argument('--with_laterality', action='store_true', default=False, help="Use only samples with laterality for PENN dataset") 
@@ -74,19 +104,114 @@ if __name__ == "__main__":
     parser.add_argument('--use_clinical_notes', action='store_true', default=False, help='Enable clinical notes for multimodal training.')
     parser.add_argument('--input_type', type=str, default='subtraction',
                         help="Tag describing the input images (e.g. 'subtraction', 'pre', 'post'). Used in the run directory name and wandb run name.")
+    parser.add_argument('--slices', type=int, default=32,
+                        help='Number of slices (depth D) used for image_crop=(224, 224, slices). Must be <= the depth produced by offline preprocessing.')
+    parser.add_argument('--path_root_data', type=str, default=None,
+                        help="Override for the preprocessed-data folder (PENN). Accepts a bare folder name "
+                             "resolved under PENN_Dataset3D.AUX_PATH (e.g. 'final_cropped_and_masked_data_d64') "
+                             "or an absolute path. Defaults to 'final_cropped_and_masked_data'.")
+    parser.add_argument(
+        '--penn_split_csv',
+        type=str,
+        default=None,
+        help=(
+            "PENN train/val split CSV (Fold, Split, UID, Malignant, …). "
+            "Filename under PENN_Dataset3D.AUX_PATH or absolute path. "
+            "Default: new_penn_datasplit.csv. Use old_penn_datasplit.csv for legacy cohort."
+        ),
+    )
+    parser.add_argument(
+        '--cohort',
+        type=str,
+        default=None,
+        help=(
+            "Short tag for this training stage (e.g. old_penn, new_penn). "
+            "Included in the run folder and wandb run name so sequential fine-tunes are easy to tell apart."
+        ),
+    )
+    parser.add_argument('--fold', type=int, default=0, help='Cross-validation fold index in the PENN split CSV.')
+    parser.add_argument(
+        '--freeze_backbone',
+        action='store_true',
+        help='Freeze DINOv2 weights; train only slice-fusion MST + classifier (recommended for small new-Penn stage).',
+    )
+    parser.add_argument(
+        '--unfreeze_encoder_blocks',
+        type=int,
+        default=0,
+        help='After loading --ckpt_path, unfreeze the last N DINOv2 ViT blocks (0 = keep backbone fully frozen if --freeze_backbone).',
+    )
+    parser.add_argument(
+        '--learning_rate',
+        type=float,
+        default=None,
+        help='LR for trainable head/MST modules (slice fusion + linear). Default: model default (1e-6). Try 1e-4 with --freeze_backbone on new Penn.',
+    )
+    parser.add_argument(
+        '--encoder_lr',
+        type=float,
+        default=None,
+        help='LR for unfrozen DINOv2 blocks when --unfreeze_encoder_blocks > 0. Default: 0.1 * learning_rate.',
+    )
+    parser.add_argument(
+        '--class_weight',
+        type=str,
+        default='none',
+        choices=['none', 'balanced'],
+        help=(
+            "CrossEntropyLoss class weights from the training split. "
+            "'balanced' uses sklearn balanced weights (minority up-weighted). "
+            "Ignored for DinoClassifierPaired (BCE). Default: none."
+        ),
+    )
     args = parser.parse_args()
+
+    # Inject image_crop derived from --slices so it flows through to the dataset
+    # (PENN_DataModule and the explicit DUKE branch both pick up image_crop from args).
+    args.image_crop = (224, 224, int(args.slices))
 
     #------------ Settings/Defaults ----------------
     current_time = datetime.now().strftime("%Y_%m_%d_%H%M%S")
     input_tag = str(args.input_type).strip().replace(' ', '_') or 'subtraction'
-    path_run_dir = Path(args.path_root_output) / args.dataset / f'{args.model_name}_{current_time}_{input_tag}_multi'
+    registers_tag = '_reg' if args.use_registers else ''
+    # Encode the slice count in the run directory name so prediction can auto-detect it.
+    slices_tag = '' if args.slices == 32 else f'_d{args.slices}'
+    cohort_tag = ''
+    if args.cohort:
+        cohort_tag = '_' + str(args.cohort).strip().replace(' ', '_')
+    path_run_dir = Path(args.path_root_output) / args.dataset / (
+        f'{args.model_name}_{current_time}_{input_tag}{cohort_tag}{registers_tag}{slices_tag}_multi'
+    )
     path_run_dir.mkdir(parents=True, exist_ok=True)
+
+    penn_split_csv_path = None
+    if args.dataset == 'PENN':
+        penn_split_csv_path = PENN_Dataset3D.resolve_split_csv_path(args.penn_split_csv)
+        print(f"PENN split CSV: {penn_split_csv_path}")
     accelerator = 'gpu'
     torch.set_float32_matmul_precision('high')
 
     # ------------ Initialize Data ----------------
     if args.dataset == 'PENN':
         dm = PENN_DataModule(**vars(args))
+        train_config = {
+            'dataset': args.dataset,
+            'model_name': args.model_name,
+            'fold': args.fold,
+            'cohort': args.cohort,
+            'penn_split_csv': str(penn_split_csv_path),
+            'split_csv_path': str(penn_split_csv_path),
+            'path_root_data': args.path_root_data,
+            'slices': args.slices,
+            'input_type': args.input_type,
+            'only_malignants': args.only_malignants,
+            'ckpt_init': args.ckpt_path,
+            'freeze_backbone': args.freeze_backbone,
+            'unfreeze_encoder_blocks': args.unfreeze_encoder_blocks,
+            'learning_rate': args.learning_rate,
+            'encoder_lr': args.encoder_lr,
+            'class_weight': args.class_weight,
+        }
     elif args.dataset == 'DUKE':
         # Filter arguments for DUKE_Dataset3D constructor
         duke_kwargs = {
@@ -124,11 +249,55 @@ if __name__ == "__main__":
         # This part can be extended to support other datasets with their own DataModules
         raise NotImplementedError(f"DataModule for {args.dataset} is not implemented yet.")
 
-    accumulate_grad_batches = 2
+    accumulate_grad_batches = 1
 
-# ------------ Initialize Model ------------
+    loss_weight_tensor = None
+    use_weighted_ce = args.class_weight.strip().lower() == 'balanced'
+    if use_weighted_ce:
+        if args.paired_sampling or args.model_name == 'DinoClassifierPaired':
+            print("Warning: --class_weight balanced is ignored for DinoClassifierPaired (BCE loss).")
+            use_weighted_ce = False
+        else:
+            dm.setup('fit')
+            train_labels = _train_malignant_labels(dm.train_dataset)
+            loss_weight_tensor = _balanced_cross_entropy_weights(train_labels, n_classes=2)
+            print(
+                f"CrossEntropyLoss class weights (balanced, train fold {args.fold}): "
+                f"benign(0)={loss_weight_tensor[0]:.4f}, malignant(1)={loss_weight_tensor[1]:.4f}"
+            )
+    if args.dataset == 'PENN':
+        if loss_weight_tensor is not None:
+            train_config['ce_class_weights'] = [float(x) for x in loss_weight_tensor.tolist()]
+        with open(path_run_dir / 'config.yaml', 'w', encoding='utf-8') as f:
+            yaml.safe_dump(train_config, f, sort_keys=False)
+
+    # ------------ Initialize Model ------------
     model_name = 'DinoClassifierPaired' if args.paired_sampling else args.model_name
-    model = get_model(model_name, **vars(args))
+    model_kwargs = vars(args).copy()
+    model_kwargs.pop('dataset', None)
+    model_kwargs.pop('path_root_output', None)
+    model_kwargs.pop('cohort', None)
+    model_kwargs.pop('penn_split_csv', None)
+    model_kwargs.pop('fold', None)
+    model_kwargs.pop('freeze_backbone', None)
+    model_kwargs.pop('unfreeze_encoder_blocks', None)
+    model_kwargs.pop('learning_rate', None)
+    model_kwargs.pop('encoder_lr', None)
+    model_kwargs.pop('class_weight', None)
+
+    if args.learning_rate is not None:
+        model_kwargs['optimizer_kwargs'] = {
+            'lr': args.learning_rate,
+            'weight_decay': 1e-2,
+        }
+    if args.encoder_lr is not None:
+        model_kwargs['encoder_lr'] = args.encoder_lr
+    if model_name in ('DinoClassifierSlice', 'DinoClassifierPaired', 'DinoTxtClassifier'):
+        model_kwargs['freeze'] = args.freeze_backbone
+    if loss_weight_tensor is not None:
+        model_kwargs['loss_kwargs'] = {'weight': loss_weight_tensor}
+
+    model = get_model(model_name, **model_kwargs)
     
     # -------------- Training Initialization ---------------
     to_monitor = "val/AUC_ROC"
@@ -136,7 +305,7 @@ if __name__ == "__main__":
     log_every_n_steps = 50
     logger = WandbLogger(
         project=f'Classifier_{args.dataset}_MST',
-        name=f'{type(model).__name__}_{input_tag}',
+        name=f'{type(model).__name__}_{input_tag}{cohort_tag}{registers_tag}{slices_tag}',
         log_model=False,
     )
     lr_monitor = LearningRateMonitor(logging_interval='step')
@@ -178,6 +347,19 @@ if __name__ == "__main__":
             model.load_weights(checkpoint['state_dict'])
         else:
             model.load_state_dict(checkpoint['state_dict'], strict=False)
+
+    if args.unfreeze_encoder_blocks > 0 and hasattr(model, 'unfreeze_encoder_last_blocks'):
+        n = model.unfreeze_encoder_last_blocks(args.unfreeze_encoder_blocks)
+        print(f"Unfroze last {n} DINOv2 encoder block(s); encoder_lr={model.encoder_lr}")
+
+    if args.freeze_backbone or args.unfreeze_encoder_blocks > 0:
+        enc_train = sum(
+            1 for n, p in model.named_parameters() if n.startswith('encoder.') and p.requires_grad
+        )
+        head_train = sum(
+            1 for n, p in model.named_parameters() if not n.startswith('encoder.') and p.requires_grad
+        )
+        print(f"Trainable parameter tensors: encoder={enc_train}, head/MST={head_train}")
 
     # ---------------- Execute Training ----------------
     # Pass ckpt_path=None because we have already loaded the weights

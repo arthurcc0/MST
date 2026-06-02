@@ -9,7 +9,7 @@ import torch
 import nibabel as nib
 from scipy.ndimage import rotate
 
-from step2b_crop_or_pad import get_breast_crop_transform
+from step2b_crop_or_pad import get_breast_crop_transform, TARGET_SHAPE
 
 def process_mask(image_path, save_dir_str, rotate_img=False):
     """Loads a single .nii.gz image, splits it, crops each side, and saves them."""
@@ -49,10 +49,10 @@ def process_mask(image_path, save_dir_str, rotate_img=False):
             side_subject = split_transforms[side](subject)
 
             # Define transforms for this side
-            crop_transform = get_breast_crop_transform(side_subject.image, target_height=256)
+            crop_transform = get_breast_crop_transform(side_subject.image, target_height=TARGET_SHAPE[0])
             final_transform = tio.Compose([
                 crop_transform,
-                tio.CropOrPad((256, 256, 32), padding_mode=0),
+                tio.CropOrPad(TARGET_SHAPE, padding_mode=0),
             ])
 
             # Apply the transform

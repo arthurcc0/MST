@@ -19,7 +19,21 @@ def random_negate_intensity_transform(x):
 import pytorch_lightning as pl
 
 class PENN_DataModule(pl.LightningDataModule):
-    def __init__(self, path_root=None, fold=0, fraction=None, batch_size=32, num_workers=4, only_malignants=False, with_laterality=False, use_clinical_notes=False, clinical_notes_path=None, **kwargs):
+    def __init__(
+        self,
+        path_root=None,
+        fold=0,
+        fraction=None,
+        batch_size=32,
+        num_workers=4,
+        only_malignants=False,
+        with_laterality=False,
+        use_clinical_notes=False,
+        clinical_notes_path=None,
+        penn_split_csv=None,
+        split_csv=None,
+        **kwargs,
+    ):
         super().__init__()
         self.path_root = path_root
         self.fold = fold
@@ -30,6 +44,7 @@ class PENN_DataModule(pl.LightningDataModule):
         self.with_laterality = with_laterality
         self.use_clinical_notes = use_clinical_notes
         self.clinical_notes_path = clinical_notes_path
+        self.split_csv_path = PENN_Dataset3D.resolve_split_csv_path(penn_split_csv or split_csv)
 
         # Forward only kwargs that PENN_Dataset3D.__init__ actually accepts.
         # Using an allowlist (inspected from the dataset class signature) makes
@@ -38,15 +53,9 @@ class PENN_DataModule(pl.LightningDataModule):
         self.dataset_kwargs = {k: v for k, v in kwargs.items() if k in _allowed}
 
     def setup(self, stage=None):
-        # Load full dataset split
-        path_csv = PENN_Dataset3D.default_split_csv_path()
-        df_full = PENN_Dataset3D.load_split(path_csv, fold=self.fold, fraction=self.fraction)
+        df_full = PENN_Dataset3D.load_split(self.split_csv_path, fold=self.fold, fraction=self.fraction)
+        print(f"[PENN_DataModule] split CSV: {self.split_csv_path} (fold={self.fold})")
 
-        # Split data
-        df_train = df_full[df_full['Split'] == 'train']
-        df_val = df_full[df_full['Split'] == 'val']
-
-        # Split data
         df_train_all = df_full[df_full['Split'] == 'train']
         df_val = df_full[df_full['Split'] == 'val']
 
@@ -76,12 +85,25 @@ class PENN_Dataset3D(data.Dataset):
 
     @classmethod
     def default_split_csv_path(cls):
-        return cls.AUX_PATH / cls.SPLIT_CSV_NAME
+        return cls.resolve_split_csv_path(None)
+
+    @classmethod
+    def resolve_split_csv_path(cls, path_or_name: str | Path | None) -> Path:
+        """Resolve a splits CSV path (absolute, or filename under AUX_PATH)."""
+        if path_or_name is None or str(path_or_name).strip() == "":
+            return cls.AUX_PATH / cls.SPLIT_CSV_NAME
+        p = Path(path_or_name)
+        if p.is_absolute():
+            return p
+        if p.parent != Path("."):
+            return p
+        return cls.AUX_PATH / p.name
 
     def __init__(
             self,
             df, # DataFrame should be passed directly
             path_root=None,
+            path_root_data=None,
             transform = None,
             image_resize = None,
             resample=None,
@@ -97,7 +119,16 @@ class PENN_Dataset3D(data.Dataset):
             use_clinical_notes=False,
             clinical_notes_path=None
         ):
-        self.path_root_data = self.AUX_PATH/'final_cropped_and_masked_data'
+        # path_root_data can be:
+        #   - None: use the historical default ('final_cropped_and_masked_data' under AUX_PATH).
+        #   - a relative path / bare folder name: resolved under AUX_PATH
+        #     (e.g. 'final_cropped_and_masked_data_d64').
+        #   - an absolute path: used verbatim.
+        if path_root_data is not None:
+            _p = Path(path_root_data)
+            self.path_root_data = _p if _p.is_absolute() else (self.AUX_PATH / _p)
+        else:
+            self.path_root_data = self.AUX_PATH / 'final_cropped_and_masked_data'
         self.get_segmentation = get_segmentation
         self.use_clinical_notes = use_clinical_notes
         self.clinical_notes_df = None
@@ -122,7 +153,7 @@ class PENN_Dataset3D(data.Dataset):
                 tio.Resize(image_resize) if image_resize is not None else tio.Lambda(identity_transform),
                 tio.Resample(resample) if resample is not None else tio.Lambda(identity_transform),
                 tio.Flip(1), # Just for viewing, otherwise upside down
-                CropOrPad(image_crop, random_center=random_center, padding_mode='minimum') if image_crop is not None else tio.Lambda(identity_transform),
+                CropOrPad(image_crop, random_center=random_center, center_along_slice_axis=True, padding_mode='minimum') if image_crop is not None else tio.Lambda(identity_transform),
                 ZNormalization(per_channel=True, per_slice=False, masking_method=znorm_masking_method, percentiles=(0.5, 99.5)),   # 0.5, 99.5   2.5, 97.5
                 # tio.Lambda(lambda x: x.moveaxis(1, 2) if torch.rand((1,),)[0]<0.5 else x ) if random_rotate else tio.Lambda(identity_transform), # WARNING: 1,2 if Subject, 2, 3 if tensor
                 tio.RandomAffine(scales=0, degrees=(0, 0, 0, 0, 0,90), translation=0, isotropic=True, default_pad_value='minimum') if random_rotate else tio.Lambda(identity_transform),

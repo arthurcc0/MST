@@ -145,7 +145,11 @@ class EnsureShapeMultiple(tio.EnsureShapeMultiple):
 
 class CropOrPad(tio.CropOrPad):
     """CropOrPad. 
-     random_center: Random center for crop and pad if no mask is set otherwise only random padding."""
+     random_center: Random center for crop and pad if no mask is set otherwise only random padding.
+     center_along_slice_axis: When True, the last spatial axis (slice axis / D)
+        is always center-cropped/padded, even if ``random_center`` randomizes
+        the in-plane axes. Useful to keep the depth selection deterministic
+        while still augmenting H/W."""
 
     def __init__(
         self,
@@ -154,6 +158,7 @@ class CropOrPad(tio.CropOrPad):
         mask_name: Optional[str] = None,
         labels: Optional[Sequence[int]] = None,
         random_center=False,
+        center_along_slice_axis: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -164,11 +169,15 @@ class CropOrPad(tio.CropOrPad):
             **kwargs
         )
         self.random_center = random_center
+        self.center_along_slice_axis = center_along_slice_axis
 
     def _get_six_bounds_parameters(self, parameters: np.ndarray) :
         result = []
-        for number in parameters:
-            if self.random_center:
+        n_axes = len(parameters)
+        for axis_idx, number in enumerate(parameters):
+            is_slice_axis = (axis_idx == n_axes - 1)
+            randomize = self.random_center and not (self.center_along_slice_axis and is_slice_axis)
+            if randomize:
                 ini = np.random.randint(low=0, high=number+1)
             else:
                 ini = int(np.ceil(number/2))
@@ -183,10 +192,16 @@ class CropOrPad(tio.CropOrPad):
         padding_kwargs = {'padding_mode': self.padding_mode}
         if padding_params is not None:
             if self.random_center:
+                n_axes = len(padding_params) // 2
                 random_padding_params = []
                 for i in range(0, len(padding_params), 2):
+                    axis_idx = i // 2
+                    is_slice_axis = (axis_idx == n_axes - 1)
                     s = padding_params[i] + padding_params[i + 1]
-                    r = np.random.randint(0, s+1)
+                    if self.center_along_slice_axis and is_slice_axis:
+                        r = int(np.ceil(s / 2))
+                    else:
+                        r = np.random.randint(0, s+1)
                     random_padding_params.extend([r, s - r])
                 padding_params = random_padding_params
             pad = tio.Pad(padding_params, **padding_kwargs)

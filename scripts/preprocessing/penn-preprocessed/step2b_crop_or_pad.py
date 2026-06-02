@@ -7,6 +7,74 @@ from tqdm import tqdm
 import functools
 from scipy.ndimage import label, zoom
 
+# Final cropped/padded volume shape written to disk as (H, W, D).
+# Bump D to enable a larger maximum slice count downstream; runtime crops
+# in the dataset can still subselect any D' <= D.
+TARGET_SHAPE = (256, 256, 32)
+
+
+def _vertical_crop_bounds(
+    bbox_top: int,
+    bbox_bottom: int,
+    image_height: int,
+    target_height: int,
+    *,
+    top_pad_fraction: float = 0.15,
+) -> tuple[int, int]:
+    """Return (top_crop, bottom_crop) for tio.Crop on the H axis (dim 2).
+
+    Fits the vertical mask/foreground bbox inside the crop window. Extra
+    vertical space is biased above the ROI (small top pad) so the superior
+    breast is not clipped while inferior background is trimmed first.
+    """
+    if image_height <= target_height:
+        return 0, 0
+
+    bbox_top = int(bbox_top)
+    bbox_bottom = int(bbox_bottom)
+    bbox_h = bbox_bottom - bbox_top + 1
+
+    if bbox_h >= target_height:
+        crop_start = (bbox_top + bbox_bottom) // 2 - target_height // 2
+    else:
+        extra = target_height - bbox_h
+        top_pad = min(int(extra * top_pad_fraction), extra, max(4, extra // 8))
+        crop_start = bbox_top - top_pad
+
+    crop_start = max(0, min(crop_start, image_height - target_height))
+    crop_end = crop_start + target_height
+
+    # Keep the full bbox inside the window when possible.
+    if bbox_top < crop_start:
+        crop_start = bbox_top
+    if bbox_bottom >= crop_end:
+        crop_start = bbox_bottom - target_height + 1
+    crop_start = max(0, min(crop_start, image_height - target_height))
+
+    top_crop = crop_start
+    bottom_crop = image_height - crop_start - target_height
+    return top_crop, bottom_crop
+
+
+def get_breast_crop_transform_from_mask(mask_3d: np.ndarray, image_height: int, target_height: int = 256):
+    """Vertical crop from a binary mask bbox (preferred for new_penn step2b)."""
+    mask_3d = np.asarray(mask_3d)
+    if mask_3d.ndim != 3:
+        raise ValueError(f"mask_3d must be 3D (W, H, D), got shape {mask_3d.shape}")
+
+    proj = (mask_3d > 0).sum(axis=(0, 2))
+    h_idx = np.where(proj > 0)[0]
+    if len(h_idx) == 0:
+        crop_start = (image_height - target_height) // 2
+        top_crop = max(0, crop_start)
+        bottom_crop = max(0, image_height - target_height - top_crop)
+        return tio.Crop((0, 0, top_crop, bottom_crop, 0, 0))
+
+    top_crop, bottom_crop = _vertical_crop_bounds(
+        int(h_idx[0]), int(h_idx[-1]), image_height, target_height
+    )
+    return tio.Crop((0, 0, top_crop, bottom_crop, 0, 0))
+
 
 def get_breast_crop_transform(image, target_height=256, downsample_factor=4):
     """Calculates a robust crop transform by localizing the largest connected component (breast tissue)."""
@@ -26,36 +94,21 @@ def get_breast_crop_transform(image, target_height=256, downsample_factor=4):
         largest_component_label = np.argmax([np.sum(labels == i) for i in range(1, num_features + 1)]) + 1
         breast_mask = labels == largest_component_label
         
-        # Project mask to find the center
         fg_indices = np.argwhere(breast_mask.sum(axis=(0, 2)) > 0)
         if len(fg_indices) > 0:
-            breast_top_downsampled = fg_indices.min().item()
-            breast_bottom_downsampled = fg_indices.max().item()
-            breast_center_downsampled = (breast_top_downsampled + breast_bottom_downsampled) // 2
-            breast_center = int(breast_center_downsampled * downsample_factor)
-        else: # Fallback if projection is empty
-            breast_center = image_height // 2
-    else: # Fallback if no components found
-        breast_center = image_height // 2
+            scale = downsample_factor
+            bbox_top = int(fg_indices.min() * scale)
+            bbox_bottom = int(fg_indices.max() * scale)
+            top_crop, bottom_crop = _vertical_crop_bounds(
+                bbox_top, bbox_bottom, image_height, target_height
+            )
+            return tio.Crop((0, 0, top_crop, bottom_crop, 0, 0))
 
-    # If image is smaller than target, don't crop; it will be padded later.
+    # Fallback: center crop
     if image_height <= target_height:
-        return tio.Crop((0, 0, 0, 0, 0, 0)) # No crop
-
-    # Define a crop window centered around the breast
-    crop_start = breast_center - (target_height // 2)
-
-    # Ensure the crop window is within the image bounds
-    crop_start = max(0, crop_start)
-    if crop_start + target_height > image_height:
-        crop_start = image_height - target_height
-    
-    crop_end = crop_start + target_height
-
-    # Define the TorchIO crop transform
-    top_crop = crop_start
-    bottom_crop = image_height - crop_end
-    return tio.Crop((0, 0, top_crop, bottom_crop, 0, 0))
+        return tio.Crop((0, 0, 0, 0, 0, 0))
+    crop_start = (image_height - target_height) // 2
+    return tio.Crop((0, 0, crop_start, image_height - crop_start - target_height, 0, 0))
 
 
 def preprocess(path_dir, path_root_in_data_str, path_root_out_data_str):
@@ -111,7 +164,7 @@ def preprocess(path_dir, path_root_in_data_str, path_root_out_data_str):
                 final_transform = tio.Compose([
                     split_transforms[side],
                     crop_transforms[side],
-                    tio.CropOrPad((256, 256, 32), padding_mode=0),
+                    tio.CropOrPad(TARGET_SHAPE, padding_mode=0),
                 ])
                 img_final = final_transform(img_resampled)
                 img_final.save(path_out_dir / path_img.name)

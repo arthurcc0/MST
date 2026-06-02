@@ -14,6 +14,7 @@ if project_root not in sys.path:
 from pathlib import Path
 import argparse
 import logging
+import yaml
 from tqdm import tqdm
 import math 
 import torch 
@@ -48,8 +49,30 @@ def set_seed(seed=42):
 set_seed()
 
 
+def _resolve_run_path(run_dir: str | Path, run_folder: str | Path) -> Path:
+    run_folder = Path(run_folder)
+    if run_folder.is_absolute():
+        return run_folder
+    return Path(run_dir) / run_folder
+
+
+def _load_train_config(path_run: Path) -> dict:
+    config_file = path_run / 'config.yaml'
+    if not config_file.is_file():
+        return {}
+    with open(config_file, encoding='utf-8') as f:
+        cfg = yaml.safe_load(f)
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _slices_from_run_folder_name(run_folder_name: str) -> int | None:
+    for token in run_folder_name.split('_'):
+        if token.startswith('d') and len(token) > 1 and token[1:].isdigit():
+            return int(token[1:])
+    return None
+
+
 def get_dataset(name, split, run_folder, **kwargs):
-    import yaml
     if name == 'DUKE':
         # Filter arguments for DUKE_Dataset3D constructor (similar to main_train.py)
         duke_kwargs = {
@@ -75,23 +98,9 @@ def get_dataset(name, split, run_folder, **kwargs):
         return MRNet_Dataset3D(split=split, **kwargs)
     elif name == 'PENN':
         penn_split_csv = kwargs.pop('penn_split_csv', None)
-        path_csv = Path(penn_split_csv) if penn_split_csv else PENN_Dataset3D.default_split_csv_path()
-
-        config_file = Path(run_folder) / 'config.yaml'
-        fold = None
-        if config_file.exists():
-            with open(config_file, 'r') as f:
-                config = yaml.safe_load(f)
-                if not isinstance(config, dict):
-                    config = {}
-            fold = config.get('fold', 0)
-            cfg_csv = config.get('penn_split_csv') or config.get('split_csv_path')
-            if penn_split_csv is None and cfg_csv:
-                path_csv = Path(cfg_csv)
-        if fold is None:
-            print(f"Warning: config.yaml not found in {run_folder}. Defaulting to fold=0.")
-            fold = 0
-
+        fold = int(kwargs.pop('fold', 0))
+        path_csv = PENN_Dataset3D.resolve_split_csv_path(penn_split_csv)
+        print(f"[PENN] split CSV: {path_csv} (fold={fold}, split={split!r})")
         df_split = PENN_Dataset3D.load_split(path_csv, fold=fold, split=split)
         return PENN_Dataset3D(df=df_split, **kwargs)
     else:
@@ -237,13 +246,42 @@ if __name__ == "__main__":
         default=None,
         type=str,
         help=(
-            'PENN splits CSV (columns include Fold, Split, UID, …). '
-            'Default: PENN_Dataset3D.default_split_csv_path(); '
-            'overridden by config.yaml keys penn_split_csv or split_csv_path when present.'
+            'PENN splits CSV (Fold, Split, UID, Malignant, …). '
+            'Filename under PENN_Dataset3D.AUX_PATH or absolute path. '
+            'Default: new_penn_datasplit.csv; overridden by config.yaml in the run folder when omitted.'
+        ),
+    )
+    parser.add_argument(
+        '--fold',
+        type=int,
+        default=None,
+        help='PENN cross-validation fold. Default: fold from config.yaml in the run folder, else 0.',
+    )
+    parser.add_argument('--use_registers', type=lambda x: str(x).lower() == 'true', nargs='?', const=True, default=False,help='Load DINOv2 backbone with 4 register tokens (Darcet et al., 2023).')
+    parser.add_argument('--slices', type=int, default=None,
+                        help='Number of slices D for image_crop=(224, 224, D). If omitted, auto-detect from a "_d{N}" tag in the run folder name (default 32).')
+    parser.add_argument('--path_root_data', type=str, default=None,
+                        help="Override for the preprocessed-data folder (PENN). Accepts a bare folder name "
+                             "resolved under PENN_Dataset3D.AUX_PATH (e.g. 'final_cropped_and_masked_data_d64') "
+                             "or an absolute path. Defaults to 'final_cropped_and_masked_data'.")
+    parser.add_argument(
+        '--split',
+        type=str,
+        default='test',
+        choices=['train', 'val', 'test', 'all'],
+        help=(
+            'PENN split to evaluate (train / val / test / all). '
+            'With --save_embeddings, run once per split (train, val, test) into the same '
+            'embeddings_fused/ folder before embedding_mlp.py --eval_mode penn_split.'
         ),
     )
     parser.add_argument('--output_dir', default='./', type=str)
     parser.add_argument('--get_attention', action='store_true', help='Flag to get attention')
+    parser.add_argument(
+        '--attention_malignant_only',
+        action='store_true',
+        help='With --get_attention, save attention overlays only for ground-truth malignant cases (target==1).',
+    )
     parser.add_argument('--get_segmentation', action='store_true', help='Flag to get attention')
     parser.add_argument('--use_tta', action='store_true', help='Use test time augmentation')
     parser.add_argument(
@@ -258,16 +296,49 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     get_attention = args.get_attention
+    attention_malignant_only = args.attention_malignant_only
     get_segmentation = args.get_segmentation
     use_tta = args.use_tta
     save_embeddings = args.save_embeddings
     print(f"Using TTA {use_tta}")
     print(f"Save embeddings {save_embeddings}")
+    if attention_malignant_only and not get_attention:
+        print("Warning: --attention_malignant_only has no effect without --get_attention.")
+    elif attention_malignant_only:
+        print("Attention maps: malignant cases only (GT==1).")
 
-    run_folder = Path(args.run_folder)
+    path_run = _resolve_run_path(args.run_dir, args.run_folder)
+    run_folder = path_run
     dataset = run_folder.parent.name
     logger = logging.getLogger(__name__)
     model_name = run_folder.name.split('_', 1)[0]
+    train_cfg = _load_train_config(path_run)
+
+    # Resolve slice count: CLI > config.yaml > _d{N} in run folder name > 32
+    if args.slices is not None:
+        slices = int(args.slices)
+    elif train_cfg.get('slices') is not None:
+        slices = int(train_cfg['slices'])
+    else:
+        slices = _slices_from_run_folder_name(run_folder.name) or 32
+    image_crop = (224, 224, slices)
+
+    fold = int(args.fold) if args.fold is not None else int(train_cfg.get('fold', 0))
+    path_root_data = args.path_root_data or train_cfg.get('path_root_data')
+    penn_split_csv = (
+        args.penn_split_csv
+        or train_cfg.get('penn_split_csv')
+        or train_cfg.get('split_csv_path')
+    )
+    penn_split_resolved = None
+    if dataset == 'PENN':
+        penn_split_resolved = PENN_Dataset3D.resolve_split_csv_path(penn_split_csv)
+        print(f"PENN split CSV: {penn_split_resolved}")
+        print(f"PENN fold: {fold}")
+        if path_root_data:
+            print(f"PENN path_root_data: {path_root_data}")
+        if train_cfg.get('cohort'):
+            print(f"PENN training cohort tag: {train_cfg['cohort']}")
     if 'DinoV2ClassifierSlice_2025_08_25_190331_multi' in str(run_folder):
         logger.info(
             f"Overriding model_name from '{model_name}' to 'DinoClassifierSlice' "
@@ -275,7 +346,6 @@ if __name__ == "__main__":
         )
         model_name = "DinoClassifierSlice"
     #------------ Settings/Defaults ----------------
-    path_run = run_folder
     results_folder = 'results_tta'if use_tta else 'results-duke-penn-training'
     path_out = Path(args.output_dir)/results_folder/run_folder
     path_out.mkdir(parents=True, exist_ok=True)
@@ -289,13 +359,20 @@ if __name__ == "__main__":
     logger.addHandler(logging.FileHandler(path_out / f'{Path(__file__).name}.txt', mode='w'))
 
     # ------------ Load Data ----------------
-    ds_test = get_dataset(
+    penn_eval_split = None if args.split == 'all' else args.split
+    ds_kwargs = dict(
         name=dataset,
-        split='test',
-        run_folder=args.run_folder,
+        split=penn_eval_split,
+        run_folder=str(path_run),
         get_segmentation=get_segmentation,
-        penn_split_csv=args.penn_split_csv,
+        penn_split_csv=str(penn_split_resolved) if penn_split_resolved is not None else None,
+        fold=fold,
+        image_crop=image_crop,
     )
+    if path_root_data is not None:
+        ds_kwargs['path_root_data'] = path_root_data
+    ds_test = get_dataset(**ds_kwargs)
+    logger.info(f"Using image_crop={image_crop} (slices={slices}), PENN split={args.split!r}.")
 
     dm = DataModule(
         ds_test=ds_test,
@@ -306,10 +383,22 @@ if __name__ == "__main__":
 
 
     # ------------ Initialize Model ------------
-    model = get_model(model_name).load_best_checkpoint(path_run)
-    # Legacy path extracts penultimate embeddings by replacing the head with Identity.
-    if not save_embeddings:
-        model.linear = nn.Identity()
+    # Auto-detect '_reg' tag from the run folder name (set by main_train.py when
+    # --use_registers is on). CLI flag still wins if explicitly passed.
+    use_registers = args.use_registers or ('reg' in run_folder.name.split('_'))
+
+    model_kwargs = {}
+    if model_name in ('DinoClassifierSlice', 'DinoV2ClassifierSlice'):
+        model_kwargs['use_registers'] = use_registers
+
+    if use_registers:
+        logger.info("Using DINOv2 with registers backbone (detected via run folder name or --use_registers).")
+
+    model = get_model(model_name).load_best_checkpoint(path_run, **model_kwargs)
+    # model = get_model(model_name).load_best_checkpoint(path_run)
+    # # Legacy path extracts penultimate embeddings by replacing the head with Identity.
+    # if not save_embeddings:
+    #     model.linear = nn.Identity()
 
     model.to(device)
     model.eval()
@@ -397,50 +486,67 @@ if __name__ == "__main__":
 
 
         elif get_attention:
-            # Output folder  
-            path_out_dir = path_out/'attention-rotated'
+            gt_label = int(target.squeeze().detach().cpu().item())
+            save_attn_maps = not (attention_malignant_only and gt_label != 1)
+
+            path_out_dir = path_out / 'attention-rotated'
             path_out_dir.mkdir(parents=True, exist_ok=True)
-        
-            # Skip cases without target label 
-            # Only eval limited number
-            #counter += 1
-            #if counter > 5:
-            #    break 
 
-            # Run prediction 
-            pred, weight, weight_slice = run_pred(model, batch, save_attn=True, use_softmax=False, use_tta=use_tta)
-
-           
-            # Clip  
-            weight_slice = weight_slice.detach().cpu()
-            weight_slice /= weight_slice.sum()
-
-            weight = weight.detach().cpu()
-            weight = weight.clip(*np.quantile(weight, [0.995, 0.999]))
+            pred, weight, weight_slice = run_pred(
+                model, batch, save_attn=save_attn_maps, use_softmax=False, use_tta=use_tta
+            )
             pred = pred.detach().cpu()
-
             pred_binary = torch.argmax(pred, dim=1)
             pred_prob = torch.softmax(pred, dim=-1)[:, 1]
-            result = {
+            classification.append({
                 'UID': uid,
-                'GT': target.item(),
+                'GT': gt_label,
                 'NN': pred_binary.item(),
-                'NN_pred': pred_prob.item()
-            }
-            classification.append(result)
-            pd.DataFrame(classification).to_csv(path_out/'classification.csv', index=False)
+                'NN_pred': pred_prob.item(),
+            })
+            pd.DataFrame(classification).to_csv(path_out / 'classification.csv', index=False)
 
-            
-            # Save 
-            save_image(tensor2image(source.rot90(2, (2, 3))), path_out_dir/f'{uid}_input.png', normalize=True)
-            source_for_viz = source.mean(dim=1, keepdim=True)
-            save_image(tensor_cam2image(minmax_norm(source_for_viz.rot90(2, (2, 3))), minmax_norm(weight.rot90(2, (2, 3))), alpha=0.5), 
-                        path_out_dir/f"{uid}_overlay.png", normalize=False)
-            save_image(tensor_cam2image(minmax_norm(source_for_viz.rot90(2, (2, 3))), minmax_norm(weight_slice.rot90(2, (2, 3))), alpha=0.5), 
-                        path_out_dir/f"{uid}_overlay_slice.png", normalize=False)
-            if dataset in ['LIDC']:
-                save_image(tensor_cam2image(minmax_norm(source), minmax_norm(batch['mask'].detach().cpu()), alpha=0.5),
-                            path_out_dir/f"{uid}_overlay_gt.png", normalize=False) 
+            if not save_attn_maps:
+                logger.debug(f"Skipping attention maps for benign UID {uid} (GT={gt_label}).")
+            else:
+                weight_slice = weight_slice.detach().cpu()
+                weight_slice /= weight_slice.sum()
+                weight = weight.detach().cpu()
+                weight = weight.clip(*np.quantile(weight, [0.995, 0.999]))
+                save_image(
+                    tensor2image(source.rot90(2, (2, 3))),
+                    path_out_dir / f'{uid}_input.png',
+                    normalize=True,
+                )
+                source_for_viz = source.mean(dim=1, keepdim=True)
+                save_image(
+                    tensor_cam2image(
+                        minmax_norm(source_for_viz.rot90(2, (2, 3))),
+                        minmax_norm(weight.rot90(2, (2, 3))),
+                        alpha=0.5,
+                    ),
+                    path_out_dir / f"{uid}_overlay.png",
+                    normalize=False,
+                )
+                save_image(
+                    tensor_cam2image(
+                        minmax_norm(source_for_viz.rot90(2, (2, 3))),
+                        minmax_norm(weight_slice.rot90(2, (2, 3))),
+                        alpha=0.5,
+                    ),
+                    path_out_dir / f"{uid}_overlay_slice.png",
+                    normalize=False,
+                )
+                if dataset in ['LIDC']:
+                    save_image(
+                        tensor_cam2image(
+                            minmax_norm(source),
+                            minmax_norm(batch['mask'].detach().cpu()),
+                            alpha=0.5,
+                        ),
+                        path_out_dir / f"{uid}_overlay_gt.png",
+                        normalize=False,
+                    )
                 
         else:
             # Run prediction 

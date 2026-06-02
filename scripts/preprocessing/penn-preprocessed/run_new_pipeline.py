@@ -1,3 +1,4 @@
+import argparse
 import torch
 import torchio as tio
 import numpy as np
@@ -15,7 +16,11 @@ import nibabel as nib
 sys.path.append(str(Path(__file__).parent))
 from step2b_crop_or_pad import get_breast_crop_transform
 
-def process_pair(image_path, original_mask_dict, save_dir_str):
+# Default final volume shape (H, W, D). Override D from the CLI to enlarge the
+# maximum slice budget; downstream training/prediction can still crop further.
+DEFAULT_TARGET_SHAPE = (256, 256, 32)
+
+def process_pair(image_path, original_mask_dict, save_dir_str, target_shape=DEFAULT_TARGET_SHAPE):
     """
     Loads a preprocessed image and its original mask, applies identical cropping to both,
     multiplies them, and saves the result.
@@ -70,8 +75,8 @@ def process_pair(image_path, original_mask_dict, save_dir_str):
             side_subject = split_transforms[side](subject)
 
             # 4. Get cropping and padding transforms
-            crop_transform = get_breast_crop_transform(side_subject.image, target_height=256)
-            pad_transform = tio.CropOrPad((256, 256, 32), padding_mode=0)
+            crop_transform = get_breast_crop_transform(side_subject.image, target_height=target_shape[0])
+            pad_transform = tio.CropOrPad(target_shape, padding_mode=0)
             final_transform = tio.Compose([crop_transform, pad_transform])
 
             processed_subject = final_transform(side_subject)
@@ -95,15 +100,18 @@ def process_pair(image_path, original_mask_dict, save_dir_str):
     except Exception as e:
         print(f"Error processing {image_path.name}: {e}")
 
-def main():
+def main(target_shape=DEFAULT_TARGET_SHAPE, save_dir=None):
     # Input directories
     image_dir = Path(r'D:\PENN-MRI\penn-preprocessed2\data')
     mask_dir = Path(r'\\10.156.155.77\mccarthy_lab\MRI\output\breast')
     
-    # Output directory
-    save_dir = Path(r'D:\PENN-MRI\final_cropped_and_masked_data')
+    # Output directory: default name encodes the depth so multiple D variants can coexist.
+    if save_dir is None:
+        save_dir = Path(rf'D:\PENN-MRI\final_cropped_and_masked_data_d{target_shape[2]}')
+    else:
+        save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Output will be saved to: {save_dir}")
+    print(f"Output will be saved to: {save_dir}  (target_shape={target_shape})")
 
     # Load file paths, considering only '*sub.nii.gz' files
     images_to_process = natsorted(list(image_dir.glob('**/*sub.nii.gz')))
@@ -113,7 +121,12 @@ def main():
     print(f"Found {len(images_to_process)} images and {len(masks)} masks.")
 
     # Use multiprocessing
-    partial_process = functools.partial(process_pair, original_mask_dict=mask_dict, save_dir_str=str(save_dir))
+    partial_process = functools.partial(
+        process_pair,
+        original_mask_dict=mask_dict,
+        save_dir_str=str(save_dir),
+        target_shape=tuple(target_shape),
+    )
 
     with Pool() as pool:
         for _ in tqdm(pool.imap_unordered(partial_process, images_to_process), total=len(images_to_process)):
@@ -122,4 +135,11 @@ def main():
     print("Finished processing all images.")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Crop/pad PENN volumes to a target (H, W, D) shape and apply masks.')
+    parser.add_argument('--height', type=int, default=DEFAULT_TARGET_SHAPE[0], help='Target H (in-plane).')
+    parser.add_argument('--width', type=int, default=DEFAULT_TARGET_SHAPE[1], help='Target W (in-plane).')
+    parser.add_argument('--depth', type=int, default=DEFAULT_TARGET_SHAPE[2], help='Target D (number of slices).')
+    parser.add_argument('--save_dir', type=str, default=None, help='Override the output directory (default encodes depth).')
+    args = parser.parse_args()
+
+    main(target_shape=(args.height, args.width, args.depth), save_dir=args.save_dir)

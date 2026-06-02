@@ -13,7 +13,7 @@ import re
 
 # Add parent directory to path to import cropping logic
 sys.path.append(str(Path(__file__).parent))
-from step2b_crop_or_pad import get_breast_crop_transform
+from step2b_crop_or_pad import get_breast_crop_transform, TARGET_SHAPE
 
 def process_and_mask(image_path, mask_dict, save_dir_str):
     """
@@ -67,8 +67,8 @@ def process_and_mask(image_path, mask_dict, save_dir_str):
             side_subject = split_transforms[side](subject)
 
             # Get the same cropping transform for both based on the image
-            crop_transform = get_breast_crop_transform(side_subject.image, target_height=256)
-            pad_transform = tio.CropOrPad((256, 256, 32), padding_mode=0)
+            crop_transform = get_breast_crop_transform(side_subject.image, target_height=TARGET_SHAPE[0])
+            pad_transform = tio.CropOrPad(TARGET_SHAPE, padding_mode=0)
             
             final_transform = tio.Compose([crop_transform, pad_transform])
 

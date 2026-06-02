@@ -178,4 +178,7 @@ class BasicClassifier(BasicModel):
             value.reset()
 
     def compute_loss(self, pred, target):
+        weight = self.loss_kwargs.get('weight')
+        if weight is not None:
+            return F.cross_entropy(pred, target, weight=weight.to(pred.device))
         return self.loss_func(pred, target)
