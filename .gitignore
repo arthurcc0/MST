@@ -1,6 +1,13 @@
+# Whitelist-style ignore: ignore everything, then un-ignore code paths.
+# Do NOT use !*.csv / !*.xlsx — that forces data files into the repo.
+
 /**/*
 !/**/
+
 /venv/
+/.venv/
+
+# File types to track
 !*.ipynb
 !*.gitignore
 !*.md
@@ -9,47 +16,75 @@
 !*.yml
 !*.ui
 !*.yaml
-!*.xlsx
-!*.csv
-!scripts/**
-!mst/**
-
 !requirements.txt
 !version.txt
-preprocessed_mapped_patient_info_nosurv.csv
-preprocessed_mapped_patient_info.csv
-preprocessed_mapped_patient_info.csv
-preprocessed_mapped_patient_info_nosurv.csv
-preprocessed_mapped_patient_info.csv
-preprocessed_mapped_patient_info_nosurv.csv
-/docs/build
+
+# Code directories (Python only under scripts — not .ps1 / local runbooks)
+!scripts/*.py
+!scripts/**/*.py
+!mst/**
+!table_utils/**
+!docs/**
 !/docs/Makefile
+!/media/**
 
-/build/
+# Local machine-specific runners (not shared)
+*.ps1
+scripts/*.ps1
+scripts/terminal_scripts.txt
 
-/runs 
+# Local LLM / clinical report outputs
+imaging_findings_reports/
+imaging_findings_reports_/
+malignancy_reports/
+
+# Data tables / spreadsheets (never commit)
+*.csv
+*.xlsx
+*.xls
+tables/
+table_utils/**/*.csv
+table_utils/**/*.xlsx
+
+# Nested repos / vendored segmentation project (not part of MST)
+table_utils/3D-Breast-FGT-and-Blood-Vessel-Segmentation/
+dinov2/
+
+# Keep table_utils Python scripts despite *.csv rules above
+!table_utils/**/*.py
+
+# Training / experiment outputs
+/runs
 /results
 /wandb
-!/media/**
-/.venv/
 results*
-__pycache__
-auto_preprocessing
-map_testing.py
-plots
-histograms
+evaluation_results*
+
+# Build / cache
+/docs/build
+/build/
+__pycache__/
+*.pyc
+*.pyo
+
+# Imaging / local artifacts
 *.nii.gz
-plots_duke
-inspect_columns.py
 segmentations/
 segmentations_fixed/
+masks
+plots
+plots_duke
+histograms
+auto_preprocessing
+
+# Misc local scripts / outputs
+map_testing.py
+inspect_columns.py
+preprocessed_mapped_patient_info*.csv
 bi4-ann.csv
 mapped_patient_info.csv
 penn_mapping.csv
-masks
-evaluation_results*
-segmentation_metrics.csv
+penn-preprocessed-mapping.csv
 my-mapping.csv
 mammamia_comparison_results.csv
-mammamia_comparison_results.csv
-penn-preprocessed_mapping.csv
+segmentation_metrics.csv
