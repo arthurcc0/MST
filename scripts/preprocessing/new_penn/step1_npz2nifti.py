@@ -36,15 +36,14 @@ import torchio as tio
 from tqdm import tqdm
 
 # ---- Configurable paths and parameters --------------------------------------
+OUT_ROOT = Path(r"D:\Users\arthur\Data\MST_birads4")
+OUT_DATA_DIR = OUT_ROOT / "preprocessed" / "data"
+
 # For new Penn data (BIRADS-4):
-# OUT_ROOT = Path(r"D:\Users\arthur\Data\MST_birads4")
-# MAPPING_CSV = OUT_ROOT / "new_penn_mapping.csv"
-# OUT_DATA_DIR = OUT_ROOT / "preprocessed" / "data"
+MAPPING_CSV = OUT_ROOT / "new_penn_mapping_v2.csv"
 
 # For old Penn data (all BI-RADS):
-OUT_ROOT = Path(r"D:\Users\arthur\Data\MST_birads4")
-MAPPING_CSV = OUT_ROOT / "old_penn_mapping.csv"
-OUT_DATA_DIR = OUT_ROOT / "preprocessed" / "data"
+# MAPPING_CSV = OUT_ROOT / "old_penn_mapping_v2.csv"
 
 PRE_KEY = "pre"
 POST_KEY = "post"

@@ -34,9 +34,9 @@ OUT_ROOT = Path(r"D:\Users\arthur\Data\MST_birads4")
 DEFAULT_DEPTH = 32
 
 # For new Penn data (BIRADS-4):
-LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\tables\matches_birads4_all.xlsx")
-MAPPING_CSV = OUT_ROOT / "new_penn_mapping.csv"
-OUTPUT_CSV = OUT_ROOT / "new_penn_datasplit.csv"
+LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\tables\matches_birads4_all_v3.xlsx")
+MAPPING_CSV = OUT_ROOT / "new_penn_mapping_v3.csv"
+OUTPUT_CSV = OUT_ROOT / "new_penn_datasplit_v3.csv"
 FINAL_DATA_DIR = OUT_ROOT / "final_cropped_and_masked_slabs_n32_s3_o0"
 
 COL_NEWACC = "newaccession"
@@ -46,9 +46,9 @@ COL_PATIENT = "PennChart_EpicPatientId"
 HIGH_RISK_POLICY = "malignant"  # or "benign" / "exclude"
 
 # For old Penn data (all BI-RADS):
-# LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\table_utils\lat_added_dummy_ehr_chat.csv")
-# MAPPING_CSV = OUT_ROOT / "old_penn_mapping.csv"
-# OUTPUT_CSV = OUT_ROOT / "old_penn_datasplit.csv"
+# LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\table_utils\lat_added_dummy_ehr_chat_no_birads4_v2.csv")
+# MAPPING_CSV = OUT_ROOT / "old_penn_mapping_v2.csv"
+# OUTPUT_CSV = OUT_ROOT / "old_penn_datasplit_v2.csv"
 # FINAL_DATA_DIR = OUT_ROOT / "final_cropped_and_masked_slabs_n32_s3_o0"
 
 # COL_NEWACC = "dummy_acc"

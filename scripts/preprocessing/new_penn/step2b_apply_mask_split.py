@@ -16,6 +16,10 @@ For each case this writes::
 
 for every ``*.nii.gz`` file in the case's folder (typically pre, post, sub).
 
+Writes ``crop_coordinates.csv`` under the output root with per-(patient, side)
+voxel ranges in the step1 ``pre.nii.gz`` space (TorchIO ``W, H, D``), so crops
+can be reproduced on the preprocessed (or upstream) volumes.
+
 Two depth-handling modes are supported:
 
 * **slice mode (default)** — final shape is ``(H, W, D)`` taken from
@@ -45,7 +49,13 @@ from tqdm import tqdm
 
 # Reuse the robust breast-crop helper from the existing penn-preprocessed pipeline.
 sys.path.append(str(Path(__file__).resolve().parents[1] / "penn-preprocessed"))
-from step2b_crop_or_pad import get_breast_crop_transform_from_mask  # noqa: E402
+from step2b_crop_or_pad import (  # noqa: E402
+    MASK_CC_MIN_FRACTION,
+    _keep_largest_3d_component,
+    build_crop_coordinate_record,
+    crop_transform_from_bounds,
+    get_breast_crop_bounds_from_mask,
+)
 
 # ---- Configurable paths and parameters --------------------------------------
 OUT_ROOT_BASE = Path(r"D:\Users\arthur\Data\MST_birads4")
@@ -54,7 +64,7 @@ MASK_DIR = Path(r"\\10.156.155.77\mccarthy_lab\shared\mri_masks\breast")
 
 # Defaults — overridable via CLI. The 32-slice default keeps the existing
 # OUT_ROOT name unsuffixed for backward compatibility.
-DEFAULT_TARGET_SHAPE = (256, 256, 32)
+DEFAULT_TARGET_SHAPE = (224, 224, 32)
 TARGET_SHAPE = DEFAULT_TARGET_SHAPE
 TARGET_HEIGHT = TARGET_SHAPE[0]
 OUT_ROOT = OUT_ROOT_BASE / "final_cropped_and_masked_data"
@@ -132,7 +142,11 @@ def _compute_slabs(volume_3d: np.ndarray, num_slabs: int, slab_size: int, overla
     # left and ceil((D-window_len)/2) on the right.
     start = (D - window_len) // 2
 
-    slabs = [volume_3d[..., start + i * stride : start + i * stride + S].max(axis=-1) for i in range(k)]
+    wh = volume_3d.shape[:-1]
+    native = np.empty(wh + (k,), dtype=volume_3d.dtype)
+    for i in range(k):
+        a = start + i * stride
+        native[..., i] = volume_3d[..., a : a + S].max(axis=-1)
 
     if k < N:
         # Fewer slabs fit than requested. Keep the native slabs centered in the
@@ -142,11 +156,48 @@ def _compute_slabs(volume_3d: np.ndarray, num_slabs: int, slab_size: int, overla
         n_missing = N - k
         pre = n_missing // 2
         post = n_missing - pre
-        slabs = [slabs[0]] * pre + slabs + [slabs[-1]] * post
+        out = np.empty(wh + (N,), dtype=native.dtype)
+        out[..., :pre] = native[..., :1]
+        out[..., pre : pre + k] = native
+        out[..., pre + k :] = native[..., -1:]
         record.update(status="padded_edges", pre_pad=pre, post_pad=post)
+        return out, record
 
     record["k_native"] = k
-    return np.stack(slabs, axis=-1), record
+    return native, record
+
+
+def _slab_source_depth_span(D: int, num_slabs: int, slab_size: int, overlap: int) -> dict:
+    """Source D indices covered by the centered native slab window (before edge repeat)."""
+    S, N, O = int(slab_size), int(num_slabs), int(overlap)
+    stride = S - O
+    record = {"source_depth_D": int(D), "slab_stride": stride, "slab_size": S}
+    if D < S:
+        record.update(source_d_start=None, source_d_end=None, slab_window_len=0)
+        return record
+
+    max_fit = (D - S) // stride + 1
+    k = min(N, max_fit)
+    window_len = (k - 1) * stride + S
+    start = (D - window_len) // 2
+    record.update(
+        source_d_start=int(start),
+        source_d_end=int(start + window_len),
+        slab_window_len=int(window_len),
+        slab_k_native=int(k),
+    )
+    return record
+
+
+def _side_subject_with_mask(side_subject: tio.Subject, mask_np: np.ndarray) -> tio.Subject:
+    """Return a copy of ``side_subject`` with the mask tensor replaced."""
+    return tio.Subject(
+        image=side_subject.image,
+        mask=tio.LabelMap(
+            tensor=torch.from_numpy(np.asarray(mask_np, dtype=np.uint8)).unsqueeze(0),
+            affine=side_subject.mask.affine,
+        ),
+    )
 
 
 def _process_case(
@@ -157,6 +208,8 @@ def _process_case(
     target_shape: tuple = TARGET_SHAPE,
     target_height: int = TARGET_HEIGHT,
     slab_params: dict = None,
+    force: bool = False,
+    mask_cc_min_fraction: float = MASK_CC_MIN_FRACTION,
 ) -> list:
     """Process a single case. Returns a list of per-(image, side) stats records.
 
@@ -170,10 +223,11 @@ def _process_case(
     out_root = Path(out_root_str)
     patient_id = path_dir.name
     stats_out: list = []
+    crop_records: list = []
 
-    # Skip if every input nifti already has a corresponding output on both sides.
+    # Skip if outputs already exist (unless force / DEBUG_SINGLE tuning).
     input_names = [p.name for p in path_dir.glob("*.nii.gz")]
-    if input_names:
+    if input_names and not force and not DEBUG_SINGLE:
         out_left = out_root / f"{patient_id}_left"
         out_right = out_root / f"{patient_id}_right"
         if out_left.is_dir() and out_right.is_dir():
@@ -181,22 +235,23 @@ def _process_case(
             existing_right = {p.name for p in out_right.glob("*.nii.gz")}
             needed = set(input_names)
             if needed.issubset(existing_left) and needed.issubset(existing_right):
-                return stats_out
+                return crop_records, stats_out
 
     mask_path = mask_dir / f"{patient_id}.npz"
     if not mask_path.is_file():
-        return stats_out
+        return crop_records, stats_out
 
     try:
         mask_arr = _load_mask_npz(mask_path)
         if mask_arr.size == 0:
-            return stats_out
+            return crop_records, stats_out
 
         # Use pre.nii.gz as the geometric reference for the mask.
         pre_path = path_dir / "pre.nii.gz"
         if not pre_path.exists():
-            return stats_out
+            return crop_records, stats_out
         pre_img = tio.ScalarImage(pre_path)
+        ref_shape = tuple(int(s) for s in pre_img.shape[1:4])  # W, H, D
 
         # Step1 wrote NIfTIs with identity-direction affines and applied a
         # torch.rot90(k=ROT90_K, dims=(0,1)) to the volume. Masks come from
@@ -213,11 +268,7 @@ def _process_case(
         mask_data = mask_arr.astype(np.uint8)
         del mask_arr
 
-        # ---- Pre-compute per-side vertical crop from the breast mask bbox ----
-        # Using intensity-based centering (get_breast_crop_transform) tended to
-        # shift the window inferiorly, clipping the superior breast and leaving
-        # background at the bottom. The mask bbox + top-biased padding keeps
-        # the full ROI in frame.
+        # ---- Per-side vertical crop: largest 3D mask CC + optional pre top extension ----
         width = pre_img.shape[1]
         split_transforms = {
             "right": tio.Crop((width // 2, 0, 0, 0, 0, 0)),
@@ -227,14 +278,46 @@ def _process_case(
             tensor=torch.from_numpy(mask_data).unsqueeze(0), affine=pre_img.affine
         )
         crop_transforms = {}
+        vertical_bounds = {}
+        cleaned_side_masks = {}
         for side in ("left", "right"):
+            side_pre = split_transforms[side](pre_img)
             side_mask = split_transforms[side](mask_label)
-            side_h = split_transforms[side](pre_img).shape[2]
-            crop_transforms[side] = get_breast_crop_transform_from_mask(
-                side_mask.data.squeeze().numpy(),
-                image_height=side_h,
-                target_height=target_height,
+            side_mask_np = side_mask.data.squeeze().numpy()
+            side_pre_np = side_pre.data.squeeze().numpy()
+            cleaned_side_masks[side] = _keep_largest_3d_component(
+                side_mask_np, min_fraction=mask_cc_min_fraction
             )
+            vertical_bounds[side] = get_breast_crop_bounds_from_mask(
+                cleaned_side_masks[side],
+                image_height=side_pre.shape[2],
+                target_height=target_height,
+                image_3d=side_pre_np,
+                min_cc_fraction=0,
+            )
+            crop_transforms[side] = crop_transform_from_bounds(vertical_bounds[side])
+            mode = "slab" if slab_params is not None else "slice"
+            final_target = (
+                (int(target_shape[0]), int(target_shape[1]), int(slab_params["num_slabs"]))
+                if slab_params is not None
+                else tuple(int(x) for x in target_shape)
+            )
+            record = build_crop_coordinate_record(
+                patient_id=patient_id,
+                side=side,
+                ref_shape=ref_shape,
+                vertical_bounds=vertical_bounds[side],
+                target_shape=final_target,
+                processing_mode=mode,
+                step1_rot90_k=STEP1_ROT90_K,
+            )
+            if slab_params is not None:
+                slab_span = _slab_source_depth_span(ref_shape[2], **slab_params)
+                record.update(slab_span)
+                if slab_span.get("source_d_start") is not None:
+                    record["full_d_start"] = slab_span["source_d_start"]
+                    record["full_d_end"] = slab_span["source_d_end"]
+            crop_records.append(record)
         del pre_img, mask_label
 
         if slab_params is None:
@@ -261,7 +344,10 @@ def _process_case(
             del img
 
             for side in ("left", "right"):
-                side_subject = split_transforms[side](subject)
+                side_subject = _side_subject_with_mask(
+                    split_transforms[side](subject),
+                    cleaned_side_masks[side],
+                )
 
                 if slab_params is None:
                     final_transform = tio.Compose([crop_transforms[side], pad_transform])
@@ -318,7 +404,80 @@ def _process_case(
     except Exception as e:
         print(f"Error processing {patient_id}: {e}")
 
-    return stats_out
+    return crop_records, stats_out
+
+
+CROP_COORD_FIELDNAMES = [
+    "patient_id",
+    "side",
+    "output_uid",
+    "processing_mode",
+    "coordinate_space",
+    "step1_rot90_k",
+    "ref_shape_W",
+    "ref_shape_H",
+    "ref_shape_D",
+    "split_crop_left",
+    "split_crop_right",
+    "split_shape_W",
+    "split_shape_H",
+    "split_shape_D",
+    "crop_method",
+    "mask_bbox_h",
+    "mask_bbox_h_top",
+    "mask_bbox_h_bottom",
+    "vertical_top_crop",
+    "vertical_bottom_crop",
+    "vertical_h_start",
+    "vertical_h_end",
+    "after_vertical_shape_W",
+    "after_vertical_shape_H",
+    "after_vertical_shape_D",
+    "crop_or_pad_w_input_start",
+    "crop_or_pad_w_input_end",
+    "crop_or_pad_w_pad_before",
+    "crop_or_pad_w_pad_after",
+    "crop_or_pad_h_input_start",
+    "crop_or_pad_h_input_end",
+    "crop_or_pad_h_pad_before",
+    "crop_or_pad_h_pad_after",
+    "crop_or_pad_d_input_start",
+    "crop_or_pad_d_input_end",
+    "crop_or_pad_d_pad_before",
+    "crop_or_pad_d_pad_after",
+    "target_shape_H",
+    "target_shape_W",
+    "target_shape_D",
+    "full_w_start",
+    "full_w_end",
+    "full_h_start",
+    "full_h_end",
+    "full_d_start",
+    "full_d_end",
+    "source_d_start",
+    "source_d_end",
+    "slab_window_len",
+    "slab_k_native",
+    "slab_stride",
+    "slab_size",
+]
+
+
+def _write_crop_coordinates_csv(records: list, out_csv: Path) -> None:
+    import csv
+
+    if not records:
+        print("[crop] no crop coordinate records produced.")
+        return
+
+    with open(out_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CROP_COORD_FIELDNAMES, extrasaction="ignore")
+        writer.writeheader()
+        for r in sorted(records, key=lambda x: (x["patient_id"], x["side"])):
+            row = {k: r.get(k, "") for k in CROP_COORD_FIELDNAMES}
+            writer.writerow(row)
+
+    print(f"[crop] wrote {len(records)} rows ({len(records) // 2} cases × 2 sides): {out_csv}")
 
 
 def _summarize_slab_stats(records: list, out_csv: Path, slab_params: dict) -> None:
@@ -360,6 +519,10 @@ def main(
     target_shape: tuple = TARGET_SHAPE,
     out_root: Path = OUT_ROOT,
     slab_params: dict = None,
+    num_workers: int = NUM_WORKERS,
+    pool_chunksize: int = 1,
+    force: bool = False,
+    mask_cc_min_fraction: float = MASK_CC_MIN_FRACTION,
 ) -> None:
     if not IN_DATA_ROOT.is_dir():
         raise FileNotFoundError(f"Input data root not found: {IN_DATA_ROOT}")
@@ -370,7 +533,8 @@ def main(
     out_root.mkdir(parents=True, exist_ok=True)
     patient_dirs = [p for p in IN_DATA_ROOT.iterdir() if p.is_dir()]
     if DEBUG_SINGLE:
-        patient_dirs = patient_dirs[:1]
+        patient_dirs = [p for p in patient_dirs if p.name == "73032737"] # Specify the case to process
+        # patient_dirs = patient_dirs[:1]
         print(f"[DEBUG_SINGLE] only processing: {[p.name for p in patient_dirs]}")
     mode_desc = (
         f"slab mode (N={slab_params['num_slabs']}, S={slab_params['slab_size']}, "
@@ -378,7 +542,12 @@ def main(
         if slab_params is not None
         else f"slice mode (target_shape={target_shape})"
     )
-    print(f"Processing {len(patient_dirs)} cases. Output: {out_root}  [{mode_desc}]")
+    n_workers = max(1, int(num_workers))
+    print(
+        f"Processing {len(patient_dirs)} cases. Output: {out_root}  [{mode_desc}]  "
+        f"(workers={n_workers}, chunksize={max(1, int(pool_chunksize))}, "
+        f"mask_cc_min_fraction={mask_cc_min_fraction})"
+    )
 
     # Bind the depth-dependent shape into the worker via partial so it survives
     # process spawn on Windows (workers re-import the module without running __main__).
@@ -390,16 +559,28 @@ def main(
         target_shape=tuple(target_shape),
         target_height=int(target_shape[0]),
         slab_params=slab_params,
+        force=force,
+        mask_cc_min_fraction=mask_cc_min_fraction,
     )
+    chunksize = max(1, int(pool_chunksize))
 
     all_stats: list = []
+    all_crop_records: list = []
     if DEBUG_SINGLE:
         for p in patient_dirs:
-            all_stats.extend(processor(p) or [])
+            crop_recs, case_stats = processor(p) or ([], [])
+            all_crop_records.extend(crop_recs or [])
+            all_stats.extend(case_stats or [])
     else:
-        with Pool(processes=NUM_WORKERS) as pool:
-            for case_stats in tqdm(pool.imap_unordered(processor, patient_dirs), total=len(patient_dirs)):
+        with Pool(processes=n_workers) as pool:
+            for crop_recs, case_stats in tqdm(
+                pool.imap_unordered(processor, patient_dirs, chunksize=chunksize),
+                total=len(patient_dirs),
+            ):
+                all_crop_records.extend(crop_recs or [])
                 all_stats.extend(case_stats or [])
+
+    _write_crop_coordinates_csv(all_crop_records, out_root / "crop_coordinates.csv")
 
     if slab_params is not None:
         _summarize_slab_stats(all_stats, out_root / "slab_stats.csv", slab_params)
@@ -427,6 +608,35 @@ if __name__ == "__main__":
     parser.add_argument('--overlap', type=int, default=DEFAULT_SLAB_PARAMS['overlap'],
                         help='Slice overlap between consecutive slabs. Must be < slab_size. '
                              'Stride between slabs = slab_size - overlap.')
+    parser.add_argument(
+        '--num_workers',
+        type=int,
+        default=NUM_WORKERS,
+        help='Parallel case workers (default: 2). Try 4–8 on local SSD; keep 2 on network drives.',
+    )
+    parser.add_argument(
+        '--pool_chunksize',
+        type=int,
+        default=4,
+        help='Cases per Pool task batch (default: 4). Reduces scheduling overhead on large runs.',
+    )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Reprocess even when output NIfTIs already exist.',
+    )
+    parser.add_argument(
+        '--mask-cc-min-fraction',
+        type=float,
+        default=MASK_CC_MIN_FRACTION,
+        help=(
+            'Per-side 3D mask cleanup before crop and image×mask: drop connected '
+            'components smaller than this fraction of the largest component '
+            f'(default: {MASK_CC_MIN_FRACTION}). Use 1.0 to keep only the single '
+            'largest blob; 0 disables the size cutoff (all components compete, '
+            'largest wins).'
+        ),
+    )
     cli_args = parser.parse_args()
 
     if cli_args.slabs and cli_args.overlap >= cli_args.slab_size:
@@ -458,4 +668,12 @@ if __name__ == "__main__":
         else:
             cli_out_root = OUT_ROOT  # unsuffixed default for backward compatibility
 
-    main(target_shape=cli_target_shape, out_root=cli_out_root, slab_params=cli_slab_params)
+    main(
+        target_shape=cli_target_shape,
+        out_root=cli_out_root,
+        slab_params=cli_slab_params,
+        num_workers=cli_args.num_workers,
+        pool_chunksize=cli_args.pool_chunksize,
+        force=bool(cli_args.force),
+        mask_cc_min_fraction=float(cli_args.mask_cc_min_fraction),
+    )

@@ -21,8 +21,45 @@ DEFAULT_RESULTS_ROOT = PROJECT_ROOT / "results-duke-penn-training" / "runs" / "P
 DEFAULT_TRAIN_RUNS_ROOT = PROJECT_ROOT / "runs" / "PENN"
 
 
-def _results_csv_for_run_name(run_name: str, results_root: Path) -> Path:
-    return results_root / run_name / "results.csv"
+def _results_csv_name(split: str | None) -> str:
+    if split in {"train", "val", "test"}:
+        return f"results_{split}.csv"
+    return "results.csv"
+
+
+def _results_csv_for_run_name(
+    run_name: str, results_root: Path, *, split: str | None = None
+) -> Path:
+    return results_root / run_name / _results_csv_name(split)
+
+
+def results_dir_name(path_run: Path, *, fold: int | None = None) -> str:
+    """Short stable directory name for predict outputs (avoids Windows MAX_PATH).
+
+    PENN subtraction runs use the cohort tag after ``subtraction_`` in the run
+    folder name, e.g. ``birads4_..._f2_reg`` instead of the full
+    ``DinoClassifierSlice_2026_..._subtraction_birads4_...`` path.
+    """
+    name = path_run.name
+    if "subtraction_" in name:
+        name = name.split("subtraction_", 1)[1]
+    if fold is not None and f"_f{fold}" not in name:
+        name = f"{name}_f{fold}"
+    return name
+
+
+def _resolve_results_csv(
+    run_path: Path,
+    results_root: Path,
+    *,
+    split: str | None = None,
+    fold: int | None = None,
+) -> Path | None:
+    for candidate in (results_dir_name(run_path, fold=fold), run_path.name):
+        csv_path = _results_csv_for_run_name(candidate, results_root, split=split)
+        if csv_path.is_file():
+            return csv_path
+    return None
 
 
 def find_fold_results(
@@ -30,8 +67,10 @@ def find_fold_results(
     folds: list[int],
     results_root: Path,
     train_runs_root: Path,
+    *,
+    split: str | None = None,
 ) -> list[Path]:
-    """Pick latest training run folder per fold, map to predict results.csv."""
+    """Pick latest training run folder per fold, map to predict results CSV."""
     paths: list[Path] = []
     for f in folds:
         matches = sorted(
@@ -43,12 +82,17 @@ def find_fold_results(
             raise FileNotFoundError(
                 f"No run folder for fold {f} matching '*{cohort}_f{f}_*' under {train_runs_root}"
             )
-        run_name = matches[0].name
-        csv_path = _results_csv_for_run_name(run_name, results_root)
-        if not csv_path.is_file():
+        run_path = matches[0]
+        csv_path = _resolve_results_csv(
+            run_path, results_root, split=split, fold=f
+        )
+        if csv_path is None:
+            short_name = results_dir_name(run_path, fold=f)
             raise FileNotFoundError(
-                f"Missing predict output for fold {f}: {csv_path}\n"
-                f"(training run: {matches[0]})"
+                f"Missing predict output for fold {f}: "
+                f"{_results_csv_for_run_name(short_name, results_root, split=split)} "
+                f"(also checked legacy name {run_path.name})\n"
+                f"(training run: {run_path})"
             )
         paths.append(csv_path)
     return paths
@@ -138,6 +182,78 @@ def plot_pooled_roc(
     print(f"Pooled ROC plot saved to {out_path}")
 
 
+def dedupe_uid_predictions(
+    df: pd.DataFrame,
+    *,
+    strategy: str = "first",
+    score_col: str = "NN_pred",
+    label_col: str = "GT",
+    score_tol: float = 1e-9,
+) -> pd.DataFrame:
+    """Collapse duplicate UIDs from pooled CV val rows to one row per case."""
+    if "UID" not in df.columns:
+        raise KeyError("Missing UID column for dedupe")
+
+    df = df.copy()
+    df["UID"] = df["UID"].astype(str).str.strip()
+    n_rows = len(df)
+    n_unique = df["UID"].nunique()
+    if n_rows == n_unique:
+        print(f"Dedupe: {n_rows} rows, all UIDs unique (no dedupe needed).")
+        return df
+
+    uid_counts = df.groupby("UID").size()
+    n_dup_uids = int((uid_counts > 1).sum())
+    print(
+        f"Dedupe: {n_rows} rows -> {n_unique} unique UIDs "
+        f"({n_dup_uids} UIDs appeared in multiple fold-val sets)."
+    )
+
+    if score_col in df.columns:
+        spread = df.groupby("UID")[score_col].agg(["min", "max", "std", "count"])
+        inconsistent = spread[spread["max"] - spread["min"] > score_tol]
+        if len(inconsistent):
+            print(
+                f"  {len(inconsistent)} UIDs have differing {score_col} across folds "
+                f"(max spread {float((inconsistent['max'] - inconsistent['min']).max()):.6g})."
+            )
+        else:
+            print(f"  All duplicate UIDs have identical {score_col} across folds.")
+
+    if strategy == "first":
+        out = df.sort_values(["UID", "Fold"] if "Fold" in df.columns else ["UID"])
+        out = out.drop_duplicates("UID", keep="first")
+    elif strategy == "mean":
+        group_cols = ["UID"]
+        agg: dict[str, str | tuple[str, str]] = {}
+        if score_col in df.columns:
+            agg[score_col] = "mean"
+        if label_col in df.columns:
+            agg[label_col] = "first"
+        if "NN" in df.columns:
+            agg["NN"] = "first"
+        if "Fold" in df.columns:
+            agg["Fold"] = "first"
+        if "predict_split" in df.columns:
+            agg["predict_split"] = "first"
+        if "results_csv" in df.columns:
+            agg["results_csv"] = "first"
+        out = df.groupby(group_cols, as_index=False).agg(agg)
+    else:
+        raise ValueError(f"Unknown dedupe strategy {strategy!r}; use 'first' or 'mean'.")
+
+    if "Fold" in df.columns:
+        fold_lists = (
+            df.groupby("UID")["Fold"]
+            .apply(lambda s: ",".join(str(int(x)) for x in sorted(s.unique())))
+            .rename("source_folds")
+        )
+        out = out.merge(fold_lists, on="UID", how="left")
+        out["n_source_folds"] = out["source_folds"].str.count(",") + 1
+
+    return out.reset_index(drop=True)
+
+
 def plot_folds_roc(
     parts: list[pd.DataFrame],
     out_path: Path,
@@ -170,6 +286,8 @@ def aggregate(
     plot_out: Path | None = None,
     bootstrapping: int = 1000,
     cohort: str | None = None,
+    dedupe_uid: bool = False,
+    dedupe_strategy: str = "first",
 ) -> pd.DataFrame:
     aucs: list[float] = []
     parts: list[pd.DataFrame] = []
@@ -189,13 +307,23 @@ def aggregate(
 
     print(f"Mean AUC: {np.mean(aucs):.3f} +/- {np.std(aucs, ddof=1):.3f}")
     pool = pd.concat(parts, ignore_index=True)
-    print(f"Pooled AUC: {roc_auc_score(pool['GT'], pool['NN_pred']):.3f}")
+    print(f"Pooled AUC (all rows): {roc_auc_score(pool['GT'], pool['NN_pred']):.3f}  n={len(pool)}")
+
+    pool_out = pool
+    if dedupe_uid:
+        pool_out = dedupe_uid_predictions(pool, strategy=dedupe_strategy)
+        print(
+            f"Pooled AUC (deduped): {roc_auc_score(pool_out['GT'], pool_out['NN_pred']):.3f}  "
+            f"n={len(pool_out)}"
+        )
 
     if save_pooled is not None:
         save_pooled = Path(save_pooled)
         save_pooled.parent.mkdir(parents=True, exist_ok=True)
-        pool.to_csv(save_pooled, index=False)
+        pool_out.to_csv(save_pooled, index=False)
         print(f"Pooled predictions saved to {save_pooled}")
+
+    pool_for_plot = pool_out if dedupe_uid else pool
 
     tag = cohort or "cv"
     if plot in {"pooled", "folds", "both"}:
@@ -216,10 +344,10 @@ def aggregate(
 
         if pooled_out is not None:
             plot_pooled_roc(
-                pool,
+                pool_for_plot,
                 pooled_out,
                 bootstrapping=bootstrapping,
-                title=f"Pooled ROC — {tag}",
+                title=f"Pooled ROC — {tag}" + (" (deduped)" if dedupe_uid else ""),
             )
         if folds_out is not None:
             plot_folds_roc(
@@ -229,7 +357,7 @@ def aggregate(
                 title=f"Per-fold ROC — {tag}",
             )
 
-    return pool
+    return pool_out
 
 
 def main() -> None:
@@ -250,6 +378,14 @@ def main() -> None:
         default=None,
         help="Cohort tag used in run folder names, e.g. new_penn_from_dino_freezebckbone_unfreeze2. "
         "Finds runs/PENN/*{cohort}_f{N}_* and matching results under results-duke-penn-training.",
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        choices=["train", "val", "test"],
+        default="test",
+        help="Predict split used when discovering results via --cohort "
+        "(reads results_{split}.csv; default: results.csv).",
     )
     parser.add_argument(
         "--folds",
@@ -294,6 +430,17 @@ def main() -> None:
         default=1000,
         help="Bootstrap resamples for ROC std band (default: 1000).",
     )
+    parser.add_argument(
+        "--dedupe-uid",
+        action="store_true",
+        help="Collapse duplicate UIDs in the pooled table (typical for val: one row per case).",
+    )
+    parser.add_argument(
+        "--dedupe-strategy",
+        choices=["first", "mean"],
+        default="first",
+        help="How to combine duplicate UID rows (default: first).",
+    )
     args = parser.parse_args()
 
     if args.results_csv:
@@ -304,6 +451,7 @@ def main() -> None:
             folds=args.folds,
             results_root=args.results_root,
             train_runs_root=args.train_runs_root,
+            split=args.split,
         )
     else:
         parser.error("Provide --results-csv and/or --cohort.")
@@ -315,6 +463,8 @@ def main() -> None:
         plot_out=args.plot_out,
         bootstrapping=args.bootstrap,
         cohort=args.cohort.strip() if args.cohort else None,
+        dedupe_uid=args.dedupe_uid,
+        dedupe_strategy=args.dedupe_strategy,
     )
 
 

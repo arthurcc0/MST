@@ -32,6 +32,7 @@ class PENN_DataModule(pl.LightningDataModule):
         clinical_notes_path=None,
         penn_split_csv=None,
         split_csv=None,
+        seed: int = 42,
         **kwargs,
     ):
         super().__init__()
@@ -40,6 +41,7 @@ class PENN_DataModule(pl.LightningDataModule):
         self.fraction = fraction
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.seed = int(seed)
         self.only_malignants_train = only_malignants
         self.with_laterality = with_laterality
         self.use_clinical_notes = use_clinical_notes
@@ -69,12 +71,28 @@ class PENN_DataModule(pl.LightningDataModule):
         self.val_dataset = PENN_Dataset3D(df_val, use_clinical_notes=self.use_clinical_notes, clinical_notes_path=self.clinical_notes_path, **self.dataset_kwargs)
 
     def train_dataloader(self):
-        return data.DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.num_workers,
-                               shuffle=True, persistent_workers=self.num_workers > 0)
+        generator = torch.Generator()
+        generator.manual_seed(self.seed)
+        return data.DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=True,
+            generator=generator,
+            persistent_workers=self.num_workers > 0,
+        )
 
     def val_dataloader(self):
-        return data.DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers,
-                               shuffle=False, persistent_workers=self.num_workers > 0)
+        generator = torch.Generator()
+        generator.manual_seed(self.seed)
+        return data.DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False,
+            generator=generator,
+            persistent_workers=self.num_workers > 0,
+        )
 
 
 class PENN_Dataset3D(data.Dataset):
@@ -117,7 +135,10 @@ class PENN_Dataset3D(data.Dataset):
             target_col=None,
             filter_col=None,
             use_clinical_notes=False,
-            clinical_notes_path=None
+            clinical_notes_path=None,
+            slab_tissue_soft_weight=False,
+            slab_tissue_min_weight=0.1,
+            slab_tissue_keep_ratio=0.5,
         ):
         # path_root_data can be:
         #   - None: use the historical default ('final_cropped_and_masked_data' under AUX_PATH).
@@ -132,6 +153,9 @@ class PENN_Dataset3D(data.Dataset):
         self.get_segmentation = get_segmentation
         self.use_clinical_notes = use_clinical_notes
         self.clinical_notes_df = None
+        self.slab_tissue_soft_weight = bool(slab_tissue_soft_weight)
+        self.slab_tissue_min_weight = float(slab_tissue_min_weight)
+        self.slab_tissue_keep_ratio = float(slab_tissue_keep_ratio)
 
         if self.use_clinical_notes and clinical_notes_path:
             try:
@@ -176,6 +200,40 @@ class PENN_Dataset3D(data.Dataset):
         self.df = self.df[self.df['img_path'].apply(self._is_usable)].reset_index(drop=True)
 
         self.item_pointers = self.df.index.tolist()
+
+    @staticmethod
+    def slab_tissue_fractions(img_tensor: torch.Tensor) -> torch.Tensor:
+        """Fraction of in-tissue voxels per slab [D], matching ZNorm masking logic."""
+        if img_tensor.dim() == 4:
+            volume = img_tensor[0]
+        else:
+            volume = img_tensor
+        fracs = []
+        for d in range(volume.shape[0]):
+            slab = volume[d]
+            fracs.append(znorm_masking_method(slab).float().mean())
+        return torch.stack(fracs)
+
+    @staticmethod
+    def slab_tissue_soft_weights(
+        img_tensor: torch.Tensor,
+        min_weight: float,
+        keep_ratio: float = 0.5,
+    ) -> torch.Tensor:
+        """
+        Per-slab soft weights in [min_weight, 1].
+
+        Slabs with tissue fraction >= keep_ratio * max(frac) keep weight 1.0.
+        Below that, weight ramps linearly down to min_weight at zero tissue.
+        """
+        fracs = PENN_Dataset3D.slab_tissue_fractions(img_tensor)
+        rel = fracs / fracs.max().clamp(min=1e-8)
+        keep_ratio = max(float(keep_ratio), 1e-8)
+        weights = torch.ones_like(rel)
+        below = rel < keep_ratio
+        t = rel[below] / keep_ratio
+        weights[below] = min_weight + (1.0 - min_weight) * t
+        return weights
 
     @staticmethod
     def _is_usable(path: Path) -> bool:
@@ -227,6 +285,14 @@ class PENN_Dataset3D(data.Dataset):
         img_tensor = transformed_subject['image'].data
 
         return_dict = {'source': img_tensor, 'target': target, 'uid': uid}
+        if self.slab_tissue_soft_weight:
+            return_dict['slab_tissue_weight'] = self.slab_tissue_soft_weights(
+                img_tensor,
+                self.slab_tissue_min_weight,
+                self.slab_tissue_keep_ratio,
+            )
+        if 'label' in item.index and pd.notna(item['label']):
+            return_dict['label'] = str(item['label']).strip()
 
         if self.use_clinical_notes and self.clinical_notes_df is not None:
             clinical_note = self._get_clinical_note(uid)

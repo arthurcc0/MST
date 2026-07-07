@@ -81,11 +81,13 @@ class DinoClassifierSlice(BasicClassifier):
         kwargs.pop('learning_rate', None)
         kwargs.pop('class_weight', None)
         loss_kwargs = kwargs.pop('loss_kwargs', {})
+        loss_cls = kwargs.pop('loss', torch.nn.CrossEntropyLoss)
         super().__init__(
             in_ch,
             out_ch,
             spatial_dims=spatial_dims,
             optimizer_kwargs=optimizer_kwargs,
+            loss=loss_cls,
             loss_kwargs=loss_kwargs,
         )
         self.encoder_lr = encoder_lr
@@ -103,12 +105,9 @@ class DinoClassifierSlice(BasicClassifier):
                 else:
                     self.encoder = torch.hub.load('facebookresearch/dinov2', f'dinov2_vit{model_size}14')
             elif model_version == 'v3':
-                self.encoder = pipeline(
-                    task="image-feature-extraction",
-                    model="facebook/dinov3-vits16-pretrain-lvd1689m",
-                    device=self.device,
-                    torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                    token=None
+                raise ValueError(
+                    "DINOv3 is not supported on DinoClassifierSlice. "
+                    "Use --model_name DinoClassifierSliceV3 instead."
                 )
         else:
             Model = {'s': vit_small, 'b': vit_base, 'l':vit_large, 'g':vit_giant2 }[model_size]
@@ -122,11 +121,7 @@ class DinoClassifierSlice(BasicClassifier):
                 for param in self.encoder.parameters():
                     param.requires_grad = False
 
-        if model_version == 'v2':
-            emb_ch = self.encoder.num_features 
-        else:
-            # DINOv3 ViT-S models have a hidden size of 384
-            emb_ch = 384
+        emb_ch = self.encoder.num_features
 
         if use_bottleneck:
             self.bottleneck = nn.Linear(emb_ch, emb_ch//4)
@@ -226,14 +221,7 @@ class DinoClassifierSlice(BasicClassifier):
 
         # x = slices2rgb(x) # [B, 1, D, H, W] -> [B*D//3, 3, H, W]
 
-        if self.model_version == 'v2':
-            x = self.encoder(x) # [(B D), C, H, W] -> [(B D), out] 
-        elif self.model_version == 'v3':
-            pil_images = tensor_to_pil(x)
-            features = self.encoder(pil_images, pool=True)
-            # The pipeline returns a list of lists; we extract the tensor from the inner list
-            # The pipeline returns a list of lists of tensors, so we flatten and stack them
-            x = torch.stack([torch.tensor(f[0]) for f in features]).to(self.device)
+        x = self.encoder(x) # [(B D), C, H, W] -> [(B D), out]
 
         # Bottleneck: force to focus on relevant features for classification 
         if hasattr(self, 'bottleneck'):
@@ -241,6 +229,13 @@ class DinoClassifierSlice(BasicClassifier):
         
         # Slice fusion 
         x = rearrange(x, '(b d) e -> b d e', b=B)
+
+        slab_tissue_weight = kwargs.get('slab_tissue_weight')
+        if slab_tissue_weight is not None:
+            w = slab_tissue_weight.to(self.device).float()
+            if w.dim() == 1:
+                w = w.unsqueeze(0)
+            x = x * w.unsqueeze(-1)
 
         if hasattr(self, 'slice_pos_emb'):
             pos = torch.arange(0, x.shape[1], dtype=torch.long, device=x.device)
@@ -278,7 +273,7 @@ class DinoClassifierSlice(BasicClassifier):
     def get_slice_attention(self):
         attention_map_slice = self.attention_maps_slice[-1] # [B, Heads, 1+D(+regs), 1+D(+regs)]
         attention_map_slice = attention_map_slice[:, :, 0, 1:] # [B, Heads, D]
-        attention_map_slice /= attention_map_slice.sum(dim=-1, keepdim=True)
+        attention_map_slice /= attention_map_slice.sum(dim=-1, keepdim=True).clamp_min(1e-8)
 
         # Option 1:
         attention_map_slice = attention_map_slice.mean(dim=1)  # [B, D]

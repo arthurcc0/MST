@@ -1,6 +1,7 @@
 pandas
 python-dotenv
 huggingface_hub
+transformers
 numpy
 tqdm
 torchio

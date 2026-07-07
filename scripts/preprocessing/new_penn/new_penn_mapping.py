@@ -25,9 +25,11 @@ Label resolution (``LABEL_SOURCE``):
       substring rules on free-text ``label`` (BIRADS-4 / legacy exports).
 
 Laterality:
-    - Numeric 1=R, 2=L; 0/3 → random side; 4/5 → excluded entirely.
-    - ``BLANK_LATERALITY_MODE``: ``holdout`` (reserved for BI-RADS-4 style) vs
-      ``random`` (e.g. screening negatives with no lateral finding in EHR exports).
+    - Old Penn numeric: 1=R, 2=L; 0/3 → random side; 4/5 → excluded entirely.
+    - New Penn strings: ``left`` / ``right``; ``both`` → random L/R (seeded);
+      ``null`` / blank → ``holdout`` or random per ``BLANK_LATERALITY_MODE``.
+    - Excel BI-RADS-4 tables: read with ``keep_default_na=False`` so literal
+      ``null`` in ``lat`` is not converted to NaN.
 
 Old Penn exclusions (when ``DISCARD_BENIGN_STUDY_WITH_BC_PRIOR``):
     - Drop rows whose ``studylevelassessment`` contains ``2: Benign`` or
@@ -50,49 +52,43 @@ from tqdm import tqdm
 VOL_DIR = Path(r"\\10.156.155.77\mccarthy_lab\shared\mri_preproc\n4bc")
 OUT_ROOT = Path(r"D:\Users\arthur\Data\MST_birads4")
 
-# === Table profile ============================================================
-# --- New Penn (BIRADS-4 workbook example) ---
-# LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\tables\matches_birads4_all.xlsx")
-# OUTPUT_CSV = OUT_ROOT / "new_penn_mapping.csv"
-# HOLDOUT_CSV = OUT_ROOT / "new_penn_holdout.csv"
-# COL_NEWACC = "newaccession"
-# COL_LATERALITY = "lat"
-# COL_LABEL = "label"
-# COL_PATIENT = "PennChart_EpicPatientId"
-# LABEL_SOURCE = "outcomes_then_legacy"
-# USE_COMPONENT_LEVEL_OUTCOME = False
-# USE_STUDY_LEVEL_FALLBACK = False
-# BLANK_LATERALITY_MODE = "holdout"
-# DISCARD_AMBIGUOUS_LEGACY_WITHOUT_OUTCOME = False
-
-# --- Old Penn (EHR / dummy export example) ---
-LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\table_utils\lat_added_dummy_ehr_chat_no_birads4.csv")
-OUTPUT_CSV = OUT_ROOT / "old_penn_mapping.csv"
-HOLDOUT_CSV = OUT_ROOT / "old_penn_holdout.csv"
-COL_NEWACC = "dummy_acc"
-COL_LATERALITY = "laterality"
+# === Table profile (swap by commenting one block in / one block out) =========
+# --- New Penn (BIRADS-4 workbook) — ACTIVE ---
+LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\tables\matches_birads4_all_v3.xlsx")
+OUTPUT_CSV = OUT_ROOT / "new_penn_mapping_v3.csv"
+HOLDOUT_CSV = OUT_ROOT / "new_penn_holdout_v3.csv"
+COL_NEWACC = "newaccession"
+COL_LATERALITY = "lat"
 COL_LABEL = "label"
 COL_PATIENT = "PennChart_EpicPatientId"
+LABEL_SOURCE = "outcomes_then_legacy"  # "precomputed" | "outcomes_then_legacy"
+BLANK_LATERALITY_MODE = "holdout"  # null/blank lat → HOLDOUT_CSV, not main mapping
+DISCARD_BENIGN_STUDY_WITH_BC_PRIOR = False
+DISCARD_AMBIGUOUS_LEGACY_WITHOUT_OUTCOME = False
 
-# Trust canonical ``label`` from lat_added_dummy_ehr_chat.csv (birads logic applied upstream).
-LABEL_SOURCE = "precomputed"  # "precomputed" | "outcomes_then_legacy"
+# --- Old Penn (EHR / dummy export) — swap in by commenting New Penn above ---
+# LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\table_utils\lat_added_dummy_ehr_chat_no_birads4_v2.csv")
+# OUTPUT_CSV = OUT_ROOT / "old_penn_mapping_v2.csv"
+# HOLDOUT_CSV = OUT_ROOT / "old_penn_holdout_v2.csv"
+# COL_NEWACC = "dummy_acc"
+# COL_LATERALITY = "laterality"
+# COL_LABEL = "label"
+# COL_PATIENT = "PennChart_EpicPatientId"
+# LABEL_SOURCE = "precomputed"
+# BLANK_LATERALITY_MODE = "random"  # 0/3 / blank lat → random L/R
+# DISCARD_BENIGN_STUDY_WITH_BC_PRIOR = True
+# DISCARD_AMBIGUOUS_LEGACY_WITHOUT_OUTCOME = False
 
-# Only used when LABEL_SOURCE == "outcomes_then_legacy".
+# Shared column names (outcomes_then_legacy path).
 COL_COMPONENT_LEVEL = "componentleveloutcome"
 COL_STUDY_LEVEL = "studyleveloutcome"
 COL_STUDY_LEVEL_ASSESSMENT = "studylevelassessment"
 COL_BC_PRIOR = "bc_prior"
-
-# Old Penn: drop study-level BI-RADS 2/3 text when patient has prior breast cancer (bc_prior=1).
-DISCARD_BENIGN_STUDY_WITH_BC_PRIOR = True
-_BENIGN_STUDY_ASSESSMENT_MARKERS = ("2: Benign", "3: Probably Benign")
 USE_COMPONENT_LEVEL_OUTCOME = False
 USE_STUDY_LEVEL_FALLBACK = False
-DISCARD_AMBIGUOUS_LEGACY_WITHOUT_OUTCOME = False
 
-# "holdout": missing lat → separate holdout CSV (BI-RADS-4 pipeline).
-# "random": missing lat → randomize left/right (e.g. true negatives).
-BLANK_LATERALITY_MODE = "random"  # "holdout" | "random"
+# Old Penn only: drop BI-RADS 2/3 + bc_prior=1 (no-op when DISCARD_BENIGN_STUDY_WITH_BC_PRIOR=False).
+_BENIGN_STUDY_ASSESSMENT_MARKERS = ("2: Benign", "3: Probably Benign")
 
 # Canonical columns written for downstream scripts (especially step3).
 STANDARD_LAT = "lat"
@@ -109,7 +105,8 @@ DEBUG_SINGLE = False
 def _read_label_table(path: Path) -> pd.DataFrame:
     dtype_base = {COL_NEWACC: str}
     if path.suffix.lower() in {".xlsx", ".xls"}:
-        df = pd.read_excel(path, dtype=dtype_base)
+        # Preserve literal "null" in lat (pandas default NA list would drop it).
+        df = pd.read_excel(path, dtype=dtype_base, keep_default_na=False)
     else:
         df = pd.read_csv(path, dtype=dtype_base)
     df[COL_NEWACC] = df[COL_NEWACC].astype(str).str.strip()
@@ -156,6 +153,8 @@ def _classify_laterality_cell(val) -> str:
             return "left"
         if s in ("right", "r"):
             return "right"
+        if s == "both":
+            return "random"
         try:
             code = int(float(s))
         except ValueError:
@@ -444,6 +443,8 @@ def create_mapping() -> None:
         df_holdout = df_holdout.drop(columns=[COL_LATERALITY])
 
     df_main[STANDARD_LAT] = sides.values
+    if len(df_holdout):
+        df_holdout[STANDARD_LAT] = "null"
 
     # Single canonical label column on disk for step3 / training
     for frame in (df_main, df_holdout):
@@ -471,7 +472,7 @@ def create_mapping() -> None:
     print(f"  post-exclude cases (still in label+disk intersection): {n_total_kept}")
     print(f"  excluded (lat codes 4/5):          {n_excluded}")
     print(f"  kept (assigned left/right):          {n_main}  "
-          f"(random lat from codes 0/3 / blank-as-random: {n_random_lat})")
+          f"(randomized lat, seed={LAT_RANDOM_SEED}: {n_random_lat})")
     print(f"  reserved for test (holdout lat):      {n_holdout}  -> {HOLDOUT_CSV}")
     print(f"  in main mapping with resolved label:  {int(n_with_label)}")
     print(f"  in main mapping with missing label:   {int(n_main - n_with_label)}")
