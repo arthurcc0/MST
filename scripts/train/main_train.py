@@ -3,7 +3,8 @@ import os
 
 script_path = os.path.abspath(__file__)
 script_dir = os.path.dirname(script_path)
-project_root = os.path.dirname(script_dir)
+scripts_dir = os.path.dirname(script_dir)
+project_root = os.path.dirname(scripts_dir)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 

@@ -2,16 +2,12 @@ import sys
 import os
 # Get the absolute path of the current script
 script_path = os.path.abspath(__file__)
-# Get the directory containing the script (e.g., /path/to/MST/scripts)
 script_dir = os.path.dirname(script_path)
-# Get the project root directory (e.g., /path/to/MST)
-project_root = os.path.dirname(script_dir)
-# Add the project root to sys.path if it's not already there
+scripts_dir = os.path.dirname(script_dir)
+project_root = os.path.dirname(scripts_dir)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-if script_dir not in sys.path:
-    sys.path.insert(0, script_dir)
-analysis_dir = os.path.join(script_dir, "analysis")
+analysis_dir = os.path.join(scripts_dir, "analysis")
 if analysis_dir not in sys.path:
     sys.path.insert(0, analysis_dir)
 

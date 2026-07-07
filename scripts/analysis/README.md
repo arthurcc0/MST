@@ -1,6 +1,6 @@
 # Analysis scripts
 
-Post-training utilities (run after `main_predict.py`):
+Post-training utilities (run after `scripts/predict/main_predict.py`):
 
 | Script | Purpose |
 |--------|---------|
