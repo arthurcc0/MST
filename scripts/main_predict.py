@@ -11,6 +11,9 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
+analysis_dir = os.path.join(script_dir, "analysis")
+if analysis_dir not in sys.path:
+    sys.path.insert(0, analysis_dir)
 
 from pathlib import Path
 import argparse

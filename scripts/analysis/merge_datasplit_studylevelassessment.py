@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 DATA_ROOT = Path(r"D:\Users\arthur\Data\MST_birads4")
 
 DEFAULT_SPLITS = {

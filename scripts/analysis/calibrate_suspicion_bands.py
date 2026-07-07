@@ -29,10 +29,13 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import auc, confusion_matrix, roc_auc_score, roc_curve
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_DIR = Path(__file__).resolve().parent
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ANALYSIS_DIR = Path(__file__).resolve().parent
+SCRIPTS_DIR = ANALYSIS_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+if str(ANALYSIS_DIR) not in sys.path:
+    sys.path.insert(0, str(ANALYSIS_DIR))
 
 from aggregate_auc import aggregate, dedupe_uid_predictions, find_fold_results
 from merge_new_penn_predict_results import (
