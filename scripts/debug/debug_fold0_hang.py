@@ -5,10 +5,10 @@ from pathlib import Path
 
 import torch
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.main_predict import run_pred
+from scripts.predict.main_predict import run_pred
 
 from mst.data.datasets.dataset_3d_penn import PENN_Dataset3D
 from mst.models.dino import DinoClassifierSlice

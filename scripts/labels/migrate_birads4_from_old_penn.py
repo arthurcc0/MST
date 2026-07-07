@@ -25,7 +25,7 @@ from pathlib import Path
 import pandas as pd
 
 # Default paths (repo-relative)
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OLD_TABLE = REPO_ROOT / "table_utils" / "lat_added_dummy_ehr_chat_no_birads4.csv"
 DEFAULT_BIRADS4_TABLE = REPO_ROOT / "tables" / "matches_birads4_all.xlsx"
 DEFAULT_OLD_OUT = REPO_ROOT / "table_utils" / "lat_added_dummy_ehr_chat_old_penn_v2.csv"

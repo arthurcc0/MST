@@ -1,17 +1,13 @@
 import sys
 import os
-
-# Get the absolute path of the current script
-script_path = os.path.abspath(__file__)
-# Get the directory containing the script (e.g., /path/to/MST/scripts)
-script_dir = os.path.dirname(script_path)
-# Get the project root directory (e.g., /path/to/MST)
-project_root = os.path.dirname(script_dir)
-# Add the project root to sys.path if it's not already there
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
 from pathlib import Path
+
+script_dir = Path(__file__).resolve().parent
+project_root = script_dir.parents[1]
+# Add the project root to sys.path if it's not already there
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 import argparse
 import logging
 from tqdm import tqdm

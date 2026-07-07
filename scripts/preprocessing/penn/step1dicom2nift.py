@@ -23,7 +23,7 @@ import functools
 import matplotlib.pyplot as plt 
 
 
-from common import get_axial_view
+from mst.utils.dicom_common import get_axial_view
 
 # Logging 
 # path_log_file = path_root/'preprocessing.log'
@@ -307,7 +307,7 @@ import functools
 import matplotlib.pyplot as plt 
 
 
-from common import get_axial_view
+from mst.utils.dicom_common import get_axial_view
 
 # Logging 
 # path_log_file = path_root/'preprocessing.log'
@@ -579,7 +579,7 @@ import functools
 import matplotlib.pyplot as plt 
 
 
-from common import get_axial_view
+from mst.utils.dicom_common import get_axial_view
 
 # Logging 
 # path_log_file = path_root/'preprocessing.log'
