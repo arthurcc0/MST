@@ -8,6 +8,7 @@ from einops import rearrange
 from transformers import AutoConfig, AutoModel
 
 from .base_model import BasicClassifier
+from .dino_common import encoder_num_heads, normalize_dino_size, slice_fusion_nhead
 from .utils.transformer_blocks import TransformerEncoderLayer
 
 DINOV3_HF_IDS = {
@@ -17,18 +18,12 @@ DINOV3_HF_IDS = {
 }
 
 
-def _slice_fusion_nhead(emb_ch: int, encoder_heads: int, preferred: int = 12) -> int:
-    for candidate in (preferred, encoder_heads, 16, 8, 6, 4, 1):
-        if emb_ch % candidate == 0:
-            return candidate
-    return 1
-
-
 def _build_dinov3_encoder(model_size: str, pretrained: bool) -> nn.Module:
-    if model_size not in DINOV3_HF_IDS:
+    size = normalize_dino_size(model_size)
+    if size not in DINOV3_HF_IDS:
         raise ValueError(f"Unsupported DINOv3 model_size {model_size!r}; choose from {list(DINOV3_HF_IDS)}")
 
-    model_id = DINOV3_HF_IDS[model_size]
+    model_id = DINOV3_HF_IDS[size]
     if pretrained:
         encoder = AutoModel.from_pretrained(model_id, attn_implementation="eager")
     else:
@@ -82,9 +77,9 @@ class DinoClassifierSliceV3(BasicClassifier):
         self.attention_maps = []
         self.attention_maps_slice = []
         self.slice_fusion_type = slice_fusion
-        self.model_size = model_size
+        self.model_size = normalize_dino_size(model_size)
 
-        self.encoder = _build_dinov3_encoder(model_size=model_size, pretrained=pretrained)
+        self.encoder = _build_dinov3_encoder(model_size=self.model_size, pretrained=pretrained)
         self.patch_size = int(self.encoder.config.patch_size)
         self.num_register_tokens = int(self.encoder.config.num_register_tokens)
 
@@ -102,7 +97,7 @@ class DinoClassifierSliceV3(BasicClassifier):
             if use_slice_pos_emb:
                 self.slice_pos_emb = nn.Embedding(256, emb_ch)
 
-            nhead = _slice_fusion_nhead(emb_ch, int(self.encoder.config.num_attention_heads))
+            nhead = slice_fusion_nhead(emb_ch, encoder_num_heads(self.encoder))
             self.slice_fusion = nn.TransformerEncoder(
                 encoder_layer=TransformerEncoderLayer(
                     d_model=emb_ch,

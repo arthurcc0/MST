@@ -7,6 +7,7 @@ studylevelassessment, etc.) after running predict on val and/or test splits.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -23,18 +24,26 @@ if str(ANALYSIS_DIR) not in sys.path:
 from aggregate_auc import aggregate, dedupe_uid_predictions, find_fold_results
 
 DEFAULT_DATA_ROOT = Path(r"D:\Users\arthur\Data\MST_birads4")
-DEFAULT_MAPPING_CSV = DEFAULT_DATA_ROOT / "new_penn_mapping_v2.csv"
-DEFAULT_DATASPLIT_CSV = DEFAULT_DATA_ROOT / "new_penn_datasplit_v2.csv"
-DEFAULT_LABEL_TABLE_XLSX = PROJECT_ROOT / "tables" / "matches_birads4_all_v3.xlsx"
+DEFAULT_MAPPING_CSV = DEFAULT_DATA_ROOT / "new_penn_mapping_v4.csv"
+DEFAULT_DATASPLIT_CSV = DEFAULT_DATA_ROOT / "new_penn_datasplit_v4.csv"
+DEFAULT_LABEL_TABLE_XLSX = PROJECT_ROOT / "tables" / "matches_birads4_all_v4.xlsx"
 DEFAULT_RESULTS_ROOT = PROJECT_ROOT / "results-pretrained-oldpenn-on-newpenn" / "runs" / "PENN"
 DEFAULT_TRAIN_RUNS_ROOT = PROJECT_ROOT / "runs" / "PENN"
 
 LABEL_TABLE_MERGE_COLS = [
     "brca",
+    "brca1",
+    "brca2",
     "PathCode",
     "histologicTypeIcdO3Description",
     "histologictypeicdo3description",
+    "gradeclinicaldescription",
+    "gradepathologicaldescription",
 ]
+
+REASON_FOR_EXAM_COLS = ("ReasonforExam", "ReasonForExam", "reasonforexam")
+_BRCA1_RE = re.compile(r"brca\s*[- ]?\s*1\b|brca1\b", re.IGNORECASE)
+_BRCA2_RE = re.compile(r"brca\s*[- ]?\s*2\b|brca2\b", re.IGNORECASE)
 
 MAPPING_MERGE_COLS = [
     "PatientID",
@@ -60,6 +69,44 @@ SPLIT_MERGE_COLS = [
 
 def _uid_from_accession_lat(accession: str, lat: str) -> str:
     return f"{str(accession).strip()}_{str(lat).strip()}"
+
+
+def _reason_for_exam_column(df: pd.DataFrame) -> str | None:
+    lower = {str(c).lower(): c for c in df.columns}
+    for candidate in REASON_FOR_EXAM_COLS:
+        if candidate.lower() in lower:
+            return lower[candidate.lower()]
+    return None
+
+
+def brca_flags_from_reason(text) -> tuple[int, int]:
+    """Return (brca1, brca2) flags parsed from ReasonforExam free text.
+
+    Gene-specific mentions only (e.g. ``BRCA1+``, ``BRCA2 gene mutation positive``).
+    Generic ``BRCA positive`` without a gene number sets neither flag.
+    """
+    if text is None or (isinstance(text, float) and pd.isna(text)):
+        return 0, 0
+    s = str(text).strip()
+    if s == "" or s.lower() in {"nan", "none"}:
+        return 0, 0
+    brca1 = 1 if _BRCA1_RE.search(s) else 0
+    brca2 = 1 if _BRCA2_RE.search(s) else 0
+    return brca1, brca2
+
+
+def add_brca_gene_flags(df: pd.DataFrame) -> pd.DataFrame:
+    """Add integer ``brca1`` / ``brca2`` columns from ReasonforExam when present."""
+    df = df.copy()
+    reason_col = _reason_for_exam_column(df)
+    if reason_col is None:
+        df["brca1"] = 0
+        df["brca2"] = 0
+        return df
+    flags = df[reason_col].map(brca_flags_from_reason)
+    df["brca1"] = [f[0] for f in flags]
+    df["brca2"] = [f[1] for f in flags]
+    return df
 
 
 def _load_mapping(mapping_csv: Path) -> pd.DataFrame:
@@ -94,6 +141,7 @@ def _load_label_table(label_table_xlsx: Path) -> pd.DataFrame:
     df[acc_col] = df[acc_col].astype(str).str.strip()
     df[lat_col] = df[lat_col].astype(str).str.strip()
     df["UID"] = df.apply(lambda r: _uid_from_accession_lat(r[acc_col], r[lat_col]), axis=1)
+    df = add_brca_gene_flags(df)
 
     missing = [c for c in LABEL_TABLE_MERGE_COLS if c not in df.columns]
     if missing:
@@ -115,9 +163,13 @@ def merge_label_table(
     merged = predict_df.merge(label_table_df, on="UID", how="left")
     n = len(merged)
     for col in LABEL_TABLE_MERGE_COLS:
-        if col in merged.columns:
+        if col not in merged.columns:
+            continue
+        if col in ("brca1", "brca2"):
+            n_hit = int(pd.to_numeric(merged[col], errors="coerce").fillna(0).eq(1).sum())
+        else:
             n_hit = int(_nonempty_label_values(merged[col]).sum())
-            print(f"  with label {col}: {n_hit} ({n_hit / max(n, 1) * 100:.1f}%)")
+        print(f"  with label {col}: {n_hit} ({n_hit / max(n, 1) * 100:.1f}%)")
     return merged
 
 

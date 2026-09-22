@@ -19,8 +19,8 @@ Inputs:
 
 Label resolution (``LABEL_SOURCE``):
     - ``precomputed``: read canonical ``label`` from the table (benign /
-      malignant / high risk); used for old Penn after ``lat_added_dummy_ehr_chat.csv``
-      is built in table_utils.
+      malignant / high risk / dcis). Used for the v4 BIRADS-4 workbook and for
+      old Penn after ``lat_added_dummy_ehr_chat.csv`` is built in table_utils.
     - ``outcomes_then_legacy``: FP/TN/FN/TP from outcome columns first, then
       substring rules on free-text ``label`` (BIRADS-4 / legacy exports).
 
@@ -54,30 +54,30 @@ OUT_ROOT = Path(r"D:\Users\arthur\Data\MST_birads4")
 
 # === Table profile (swap by commenting one block in / one block out) =========
 # --- New Penn (BIRADS-4 workbook) — ACTIVE ---
-LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\tables\matches_birads4_all_v3.xlsx")
-OUTPUT_CSV = OUT_ROOT / "new_penn_mapping_v3.csv"
-HOLDOUT_CSV = OUT_ROOT / "new_penn_holdout_v3.csv"
-COL_NEWACC = "newaccession"
-COL_LATERALITY = "lat"
-COL_LABEL = "label"
-COL_PATIENT = "PennChart_EpicPatientId"
-LABEL_SOURCE = "outcomes_then_legacy"  # "precomputed" | "outcomes_then_legacy"
-BLANK_LATERALITY_MODE = "holdout"  # null/blank lat → HOLDOUT_CSV, not main mapping
-DISCARD_BENIGN_STUDY_WITH_BC_PRIOR = False
-DISCARD_AMBIGUOUS_LEGACY_WITHOUT_OUTCOME = False
+# LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\tables\matches_birads4_all_v5_noBenHR.xlsx")
+# OUTPUT_CSV = OUT_ROOT / "new_penn_mapping_v5_noBenHR.csv"
+# HOLDOUT_CSV = OUT_ROOT / "new_penn_holdout_v5_noBenHR.csv"
+# COL_NEWACC = "newaccession"
+# COL_LATERALITY = "lat"
+# COL_LABEL = "label"
+# COL_PATIENT = "MRN"
+# LABEL_SOURCE = "precomputed"  # "precomputed" | "outcomes_then_legacy"
+# BLANK_LATERALITY_MODE = "holdout"  # null/blank lat → HOLDOUT_CSV, not main mapping
+# DISCARD_BENIGN_STUDY_WITH_BC_PRIOR = False
+# DISCARD_AMBIGUOUS_LEGACY_WITHOUT_OUTCOME = False
 
 # --- Old Penn (EHR / dummy export) — swap in by commenting New Penn above ---
-# LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\table_utils\lat_added_dummy_ehr_chat_no_birads4_v2.csv")
-# OUTPUT_CSV = OUT_ROOT / "old_penn_mapping_v2.csv"
-# HOLDOUT_CSV = OUT_ROOT / "old_penn_holdout_v2.csv"
-# COL_NEWACC = "dummy_acc"
-# COL_LATERALITY = "laterality"
-# COL_LABEL = "label"
-# COL_PATIENT = "PennChart_EpicPatientId"
-# LABEL_SOURCE = "precomputed"
-# BLANK_LATERALITY_MODE = "random"  # 0/3 / blank lat → random L/R
-# DISCARD_BENIGN_STUDY_WITH_BC_PRIOR = True
-# DISCARD_AMBIGUOUS_LEGACY_WITHOUT_OUTCOME = False
+LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\table_utils\lat_added_dummy_ehr_chat_no_birads4_v2.csv")
+OUTPUT_CSV = OUT_ROOT / "old_penn_mapping_v2.csv"
+HOLDOUT_CSV = OUT_ROOT / "old_penn_holdout_v2.csv"
+COL_NEWACC = "dummy_acc"
+COL_LATERALITY = "laterality"
+COL_LABEL = "label"
+COL_PATIENT = "MRN"
+LABEL_SOURCE = "precomputed"
+BLANK_LATERALITY_MODE = "random"  # 0/3 / blank lat → random L/R
+DISCARD_BENIGN_STUDY_WITH_BC_PRIOR = True
+DISCARD_AMBIGUOUS_LEGACY_WITHOUT_OUTCOME = False
 
 # Shared column names (outcomes_then_legacy path).
 COL_COMPONENT_LEVEL = "componentleveloutcome"
@@ -94,7 +94,7 @@ _BENIGN_STUDY_ASSESSMENT_MARKERS = ("2: Benign", "3: Probably Benign")
 STANDARD_LAT = "lat"
 STANDARD_LABEL = "label"
 
-ALLOWED_LABELS = frozenset({"benign", "malignant", "high risk"})
+ALLOWED_LABELS = frozenset({"benign", "malignant", "high risk", "dcis"})
 
 LAT_RANDOM_SEED = 42
 
@@ -195,7 +195,7 @@ def _legacy_label_to_canonical(val) -> str | pd.NA:
     if not s:
         return pd.NA
     low = s.lower().replace("-", " ")
-    if low in ("malignant", "benign", "high risk"):
+    if low in ("malignant", "benign", "high risk", "dcis"):
         return low
 
     benign_markers = (

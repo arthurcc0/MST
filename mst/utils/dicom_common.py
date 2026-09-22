@@ -1,3 +1,9 @@
+"""Helpers for reading a folder of DICOM slices into a 3D numpy volume.
+
+The volume builder is ``get_axial_view``: it loads a list of ``.dcm`` paths,
+sorts them in anatomical order, stacks ``pixel_array`` as (H, W, D), and
+returns in-plane spacing plus through-plane spacing.
+"""
 import os
 from natsort import natsorted
 import pydicom
@@ -5,13 +11,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 def get_dicom_files(directory):
+    """Collect ``*.dcm`` paths under ``directory`` (recursive).
+
+    Natural-sorts filenames so ``2.dcm`` comes before ``10.dcm``. That order
+    is only a convenience; ``get_axial_view`` re-sorts by DICOM geometry.
+    """
     dicom_files = []
     for root, _, files in os.walk(directory):
         for file in files:
             if file.endswith('.dcm'):
                 dicom_files.append(os.path.join(root, file))
     
-    dicom_files = natsorted(dicom_files) # Sort files in natural order
+    dicom_files = natsorted(dicom_files)
 
     return dicom_files
 
@@ -66,56 +77,74 @@ def depth_first_search_interface(elements, visited_set: set):
         if element not in visited_set:
             dfs(element)
 
-# # Identify and rotate sagittal views
-# if abs(iop[0]) < 0.1 and abs(iop[4]) < 0.1:  # Sagittal detection 
 def get_axial_view(dicom_file_list):
+    """Read a list of DICOM paths and stack them into one 3D volume.
+
+    File names are ignored for order. Slices are sorted by geometry when
+    possible so the last axis runs through the stack (typically inferior →
+    superior for axial MRI):
+
+    1. ``ImagePositionPatient`` along the slice-normal axis (from IOP).
+    2. Else ``SliceLocation``.
+    3. Else ``InstanceNumber``.
+
+    Returns
+    -------
+    volume : np.ndarray
+        Shape (H, W, D) from ``pixel_array``.
+    pixel_spacing : tuple
+        In-plane (row, col) mm from ``PixelSpacing``.
+    slice_thickness : float
+        Through-plane mm: ``SpacingBetweenSlices`` if present, else
+        ``SliceThickness``.
+    z_string : str
+        Which of those two tags supplied the through-plane spacing.
+    """
     dicom_slices = [pydicom.dcmread(f) for f in dicom_file_list]
 
-    # Sorting logic based on available metadata
+    # Prefer patient coordinates over filename / instance order.
     if all(hasattr(d, "ImagePositionPatient") for d in dicom_slices):
         first_slice = dicom_slices[0]
         if hasattr(first_slice, "ImageOrientationPatient"):
-            # Extract orientation vectors
+            # IOP is two 3-vectors: image row direction, then column direction,
+            # in patient LPS. Their cross product is the slice-to-slice axis.
             iop = [float(x) for x in first_slice.ImageOrientationPatient]
             row_vector = np.array(iop[:3])
             col_vector = np.array(iop[3:])
-            # Compute the normal vector (slice direction)
             normal = np.cross(row_vector, col_vector)
-            # Determine which coordinate (x=0, y=1, or z=2) varies the most
+            # Axial ≈ z, sagittal ≈ x, coronal ≈ y. Sort IPP along that axis.
             sort_axis = int(np.argmax(np.abs(normal)))
             dicom_slices.sort(key=lambda d: float(d.ImagePositionPatient[sort_axis]))
         else:
-            # Fallback to z-axis sorting if orientation is not available
             dicom_slices.sort(key=lambda d: float(d.ImagePositionPatient[2]))
     elif all(hasattr(d, "SliceLocation") for d in dicom_slices):
         dicom_slices.sort(key=lambda d: float(d.SliceLocation))
     else:
         dicom_slices.sort(key=lambda d: int(d.InstanceNumber))
 
-    # Stack the slices into a 3D numpy array
     try:
+        # Last axis is depth so volume[..., k] is one slice.
+        # Depending on applciation, stack on axis 0 or -1.
         volume = np.stack([d.pixel_array for d in dicom_slices], axis=-1)
 
-        # Optional: Correct image orientation if necessary
         first_slice = dicom_slices[0]
         if hasattr(first_slice, "ImageOrientationPatient"):
             iop = [float(x) for x in first_slice.ImageOrientationPatient]
             row_vector = iop[:3]
             col_vector = iop[3:]
-            
-            # Check if the series is sagittal: normal dominated by x (index 0)
-            # if np.abs(normal[0]) > np.abs(normal[1]) and np.abs(normal[0]) > np.abs(normal[2]):
-            #     volume = np.transpose(volume, (2, 1, 0))
-            #     volume = np.rot90(np.fliplr(volume), k=1)
-            # else:
-            # # For axial (or other) views, you might need to flip the image based on orientation.
+            # If the row axis points opposite +X (patient left), the image
+            # is stored left-right flipped relative to a standard axial view.
             if row_vector[0] < 0:
                 volume = np.flip(volume, axis=1)
+            # If the column axis points opposite +Y (patient posterior),
+            # flip superior-inferior in-plane (array axis 0).
             if col_vector[1] < 0:
                 volume = np.flip(volume, axis=0)
         
         if hasattr(first_slice, 'PixelSpacing'):
             pixel_spacing = tuple(map(float, first_slice.PixelSpacing))
+        # SpacingBetweenSlices is the true gap between slice centers when
+        # they overlap or have a gap; SliceThickness is the excited slab.
         if hasattr(first_slice, 'SpacingBetweenSlices'):
             slice_thickness = float(first_slice.SpacingBetweenSlices)
             z_string = 'Using SpacingBetweenSlices'

@@ -5,6 +5,13 @@ from transformers import pipeline
 from .utils.transformer_blocks import TransformerEncoderLayer
 import torch.nn as nn
 from einops import rearrange
+from .dino_common import (
+    DINOV2_SIZES,
+    dinov2_hub_name,
+    encoder_num_heads,
+    normalize_dino_size,
+    slice_fusion_nhead,
+)
 from .extern.dinov2.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
 from .extern.dinov2.tokenizer import Tokenizer
 import requests
@@ -63,7 +70,7 @@ class DinoClassifierSlice(BasicClassifier):
             save_attn = False,
             rotary_positional_encoding=None,
             optimizer_kwargs={'lr': 1e-6, 'weight_decay': 1e-2},
-            model_size = 's', # [s, b, l, 'g']
+            model_size = 's', # s / b / l / g  (small, base, large, giant)
             model_version='v2',
             use_registers = False,
             use_bottleneck=False,
@@ -97,20 +104,24 @@ class DinoClassifierSlice(BasicClassifier):
         self.use_registers = use_registers
         self.slice_fusion_type = slice_fusion
         self.model_version = model_version
+        self.model_size = normalize_dino_size(model_size)
 
         if pretrained:
             if model_version == 'v2':
-                if use_registers:
-                    self.encoder = torch.hub.load('facebookresearch/dinov2', f'dinov2_vit{model_size}14_reg')
-                else:
-                    self.encoder = torch.hub.load('facebookresearch/dinov2', f'dinov2_vit{model_size}14')
+                hub_name = dinov2_hub_name(self.model_size, use_registers=use_registers)
+                spec = DINOV2_SIZES[self.model_size]
+                print(
+                    f"[DinoClassifierSlice] DINOv2 {hub_name} "
+                    f"(embed={spec['embed']}, heads={spec['heads']})"
+                )
+                self.encoder = torch.hub.load('facebookresearch/dinov2', hub_name)
             elif model_version == 'v3':
                 raise ValueError(
                     "DINOv3 is not supported on DinoClassifierSlice. "
                     "Use --model_name DinoClassifierSliceV3 instead."
                 )
         else:
-            Model = {'s': vit_small, 'b': vit_base, 'l':vit_large, 'g':vit_giant2 }[model_size]
+            Model = {'s': vit_small, 'b': vit_base, 'l':vit_large, 'g':vit_giant2 }[self.model_size]
             self.encoder = Model(patch_size=14, num_register_tokens=0)
    
         # Freeze backbone 
@@ -132,10 +143,11 @@ class DinoClassifierSlice(BasicClassifier):
             if use_slice_pos_emb:
                 self.slice_pos_emb = nn.Embedding(256, emb_ch) # WARNING: Assuming max. 256 slices
 
+            nhead = slice_fusion_nhead(emb_ch, encoder_num_heads(self.encoder, DINOV2_SIZES[self.model_size]["heads"]))
             self.slice_fusion = nn.TransformerEncoder(
                 encoder_layer=TransformerEncoderLayer(
                     d_model=emb_ch,
-                    nhead=12, 
+                    nhead=nhead,
                     dim_feedforward=1*emb_ch,
                     dropout=0.0,
                     batch_first=True,

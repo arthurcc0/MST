@@ -199,7 +199,15 @@ def get_dataset(name, split, run_folder, **kwargs):
         fold = int(kwargs.pop('fold', 0))
         path_csv = PENN_Dataset3D.resolve_split_csv_path(penn_split_csv)
         print(f"[PENN] split CSV: {path_csv} (fold={fold}, split={split!r})")
-        df_split = PENN_Dataset3D.load_split(path_csv, fold=fold, split=split)
+        high_risk_policy = kwargs.pop('high_risk_policy', 'malignant')
+        dcis_policy = kwargs.pop('dcis_policy', 'malignant')
+        df_split = PENN_Dataset3D.load_split(
+            path_csv,
+            fold=fold,
+            split=split,
+            high_risk_policy=high_risk_policy,
+            dcis_policy=dcis_policy,
+        )
         return PENN_Dataset3D(df=df_split, **kwargs)
     else:
         raise ValueError(f"Unknown dataset: {name}")
@@ -363,6 +371,29 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        '--high-risk-policy',
+        dest='high_risk_policy',
+        type=str,
+        default=None,
+        choices=('malignant', 'benign', 'exclude'),
+        help=(
+            "How to treat datasplit rows with label 'high risk'. "
+            "Default: keep and count as malignant (score them). "
+            "Does not inherit --high-risk-policy exclude from training."
+        ),
+    )
+    parser.add_argument(
+        '--dcis-policy',
+        dest='dcis_policy',
+        type=str,
+        default=None,
+        choices=('malignant', 'benign', 'exclude'),
+        help=(
+            "How to treat datasplit rows with label 'dcis'. "
+            "Default: config.yaml if set, else malignant."
+        ),
+    )
+    parser.add_argument(
         '--fold',
         type=int,
         default=None,
@@ -505,10 +536,15 @@ if __name__ == "__main__":
     if path_root_data is not None:
         ds_kwargs['path_root_data'] = path_root_data
     if dataset == 'PENN':
+        high_risk_policy = args.high_risk_policy or 'malignant'
+        dcis_policy = args.dcis_policy or train_cfg.get('dcis_policy') or 'malignant'
+        print(f"PENN high_risk_policy: {high_risk_policy!r}  dcis_policy: {dcis_policy!r}")
         ds_kwargs.update({
             'slab_tissue_soft_weight': args.slab_tissue_soft_weight,
             'slab_tissue_min_weight': args.slab_tissue_min_weight,
             'slab_tissue_keep_ratio': args.slab_tissue_keep_ratio,
+            'high_risk_policy': high_risk_policy,
+            'dcis_policy': dcis_policy,
         })
     ds_test = get_dataset(**ds_kwargs)
     logger.info(f"Using image_crop={image_crop} (slices={slices}), PENN split={args.split!r}.")
@@ -527,6 +563,10 @@ if __name__ == "__main__":
     use_registers = args.use_registers or ('reg' in run_folder.name.split('_'))
 
     model_kwargs = {}
+    model_size = train_cfg.get('model_size')
+    if model_size:
+        model_kwargs['model_size'] = model_size
+        logger.info(f"DINO model_size={model_size!r} (from config.yaml).")
     if model_name in ('DinoClassifierSlice', 'DinoV2ClassifierSlice'):
         model_kwargs['use_registers'] = use_registers
         if use_registers:

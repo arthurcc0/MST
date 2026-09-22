@@ -56,8 +56,9 @@ CLASS_COLORS = {
     "malignant": "#d62728",
     "benign": "#2ca02c",
     "high risk": "#1f77b4",
+    "dcis": "#9467bd",
 }
-CLASS_ORDER = ["benign", "high risk", "malignant"]
+CLASS_ORDER = ["benign", "high risk", "dcis", "malignant"]
 DEFAULT_OUT_DIR = PROJECT_ROOT / "results-pretrained-oldpenn-on-newpenn"
 BAND_CUTPOINT_COLORS = {
     "t_low": "#2ca02c",
@@ -71,6 +72,8 @@ def _canonical_class_label(label) -> str:
     text = " ".join(text.split())
     if text.replace(" ", "") == "highrisk":
         return "high risk"
+    if text in {"dcis", "ductal carcinoma in situ"}:
+        return "dcis"
     return text
 
 
@@ -299,6 +302,128 @@ def operating_points_per_case(
     tpr = np.array([np.sum(pos_mask & (y_score >= s)) / n_pos for s in y_score])
     fpr = np.array([np.sum(neg_mask & (y_score >= s)) / n_neg for s in y_score])
     return fpr, tpr
+
+
+def _brca_gene_mask(df: pd.DataFrame, gene_col: str) -> np.ndarray:
+    """Boolean mask for rows flagged positive in ``brca1`` or ``brca2``."""
+    if gene_col not in df.columns:
+        return np.zeros(len(df), dtype=bool)
+    return pd.to_numeric(df[gene_col], errors="coerce").fillna(0).astype(int).eq(1).to_numpy()
+
+
+def plot_roc_brca_cases(
+    df: pd.DataFrame,
+    thresholds: dict,
+    out_path: Path,
+    *,
+    cohort: str | None = None,
+    jitter: float = 0.012,
+    marker_size: float = 36,
+    alpha: float = 0.85,
+    seed: int = 3,
+) -> None:
+    """Pooled ROC (gray) with BRCA cases: circle/triangle by gene, color by class."""
+    if df.empty:
+        print("Skipping BRCA ROC plot: no cases.")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.plot([0, 1], [0, 1], linestyle="--", color="k", lw=1, alpha=0.6, zorder=1)
+
+    y_true = df["GT"].to_numpy(dtype=int)
+    y_score = scores_for_bands(df["NN_pred"], thresholds).to_numpy(dtype=float)
+    fpr, tpr, _ = roc_curve(y_true, y_score)
+    auc_pooled = auc(fpr, tpr)
+    ax.plot(
+        fpr,
+        tpr,
+        color="#c8c8c8",
+        lw=2.8,
+        alpha=0.95,
+        zorder=2,
+        label=f"All cases (n={len(df)}, AUC = {auc_pooled:.2f})",
+    )
+
+    fpr_pts, tpr_pts = operating_points_per_case(y_true, y_score)
+    rng = np.random.default_rng(seed)
+    fpr_j = np.clip(fpr_pts + rng.normal(0, jitter, len(fpr_pts)), 0.0, 1.0)
+    tpr_j = np.clip(tpr_pts + rng.normal(0, jitter, len(tpr_pts)), 0.0, 1.0)
+
+    class_labels = class_labels_from_df(df)
+    mask_brca1 = _brca_gene_mask(df, "brca1")
+    mask_brca2 = _brca_gene_mask(df, "brca2")
+
+    series = [
+        ("brca1", mask_brca1, "o", "BRCA1"),
+        ("brca2", mask_brca2, "^", "BRCA2"),
+    ]
+    legend_handles: list[Line2D | Patch] = [
+        Line2D([0], [0], color="#c8c8c8", lw=2.8, label=f"All cases (n={len(df)}, AUC = {auc_pooled:.2f})"),
+    ]
+    for _gene, gene_mask, marker, gene_label in series:
+        for cls in CLASS_ORDER:
+            mask = gene_mask & (class_labels == cls)
+            if not np.any(mask):
+                continue
+            color = CLASS_COLORS.get(cls, "#7f7f7f")
+            ax.scatter(
+                fpr_j[mask],
+                tpr_j[mask],
+                s=marker_size,
+                marker=marker,
+                c=color,
+                alpha=alpha,
+                edgecolors="white",
+                linewidths=0.5,
+                zorder=4 if marker == "o" else 5,
+            )
+            legend_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    marker=marker,
+                    color="w",
+                    markerfacecolor=color,
+                    markeredgecolor="white",
+                    markeredgewidth=0.5,
+                    markersize=8,
+                    linestyle="None",
+                    label=f"{gene_label}, {cls} (n={int(mask.sum())})",
+                )
+            )
+
+    if not mask_brca1.any() and not mask_brca2.any():
+        ax.text(
+            0.03,
+            0.97,
+            "No BRCA1/BRCA2+ cases in pooled set.\n"
+            "Use --merge-metadata or --merge-label-table to attach brca1/brca2.",
+            transform=ax.transAxes,
+            fontsize=8,
+            va="top",
+            ha="left",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.9),
+        )
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("1 - Specificity (FPR)")
+    ax.set_ylabel("Sensitivity (TPR)")
+    title = "Pooled ROC: BRCA cases (○ BRCA1, △ BRCA2; colored by class)"
+    if cohort:
+        title += f"\n{cohort}"
+    ax.set_title(title, fontsize=11)
+    ax.grid(color="#dddddd", alpha=0.8)
+    ax.set_axisbelow(True)
+    ax.legend(handles=legend_handles, loc="lower right", fontsize=8, framealpha=0.9)
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    print(f"ROC BRCA-case plot saved to {out_path}")
 
 
 def _scatter_cases_on_roc(
@@ -545,7 +670,7 @@ def plot_roc_cases_by_class(
     # note = (
     #     "Test cases only: (FPR, TPR) when threshold = that case's score.\n"
     #     "Small jitter for visibility. "
-    #     "Colors: benign=green, high risk=blue, malignant=red."
+    #     "Colors: benign=green, high risk=blue, dcis=purple, malignant=red."
     # )
     # ax.text(
     #     0.03,
@@ -781,14 +906,14 @@ def main() -> None:
         action="store_true",
         help=(
             "Attach mapping/datasplit metadata and label-table pathology columns "
-            "(brca, PathCode, histology) to outputs."
+            "(brca, brca1, brca2, PathCode, histology, grade clinical/pathological) to outputs."
         ),
     )
     parser.add_argument(
         "--merge-label-table",
         action="store_true",
         help=(
-            "Attach brca/PathCode/histology from matches_birads4 label table only "
+            "Attach brca/brca1/brca2/PathCode/histology/grade from matches_birads4 label table only "
             "(no mapping/datasplit). Implied when --merge-metadata is set."
         ),
     )
@@ -853,6 +978,17 @@ def main() -> None:
         "--no-plot-scores",
         action="store_true",
         help="Skip the class score histogram when using --plot.",
+    )
+    parser.add_argument(
+        "--plot-brca-out",
+        type=Path,
+        default=None,
+        help="BRCA1/BRCA2 case ROC PNG (default: <out-dir>/roc_brca_cases_<cohort>.png).",
+    )
+    parser.add_argument(
+        "--no-plot-brca",
+        action="store_true",
+        help="Skip the pooled ROC + BRCA1/BRCA2 case scatter plot when using --plot.",
     )
     args = parser.parse_args()
 
@@ -1015,6 +1151,22 @@ def main() -> None:
                 split_name="test",
                 cohort=cohort,
             )
+        if not args.no_plot_brca and len(test_df):
+            if "brca1" not in test_df.columns or "brca2" not in test_df.columns:
+                print(
+                    "Skipping BRCA ROC plot: brca1/brca2 not merged. "
+                    "Re-run with --merge-metadata or --merge-label-table."
+                )
+            else:
+                brca_path = args.plot_brca_out or (
+                    out_dir / f"roc_brca_cases_{tag}.png"
+                )
+                plot_roc_brca_cases(
+                    test_df,
+                    thresholds,
+                    brca_path,
+                    cohort=cohort,
+                )
 
     if args.merge_metadata:
         strat_parts = []

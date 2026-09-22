@@ -140,11 +140,19 @@ def load_embeddings_for_penn_split(
     fold: int,
     to_exclude: list[str],
     one_side: bool = False,
+    high_risk_policy: str = "exclude",
+    dcis_policy: str = "malignant",
 ) -> pd.DataFrame:
     """Join embeddings with new_penn_datasplit (UID, Split, Malignant) for one MST fold."""
     embs_df = load_embedding_npz_dir(embeddings_dir, to_exclude)
     split_path = PENN_Dataset3D.resolve_split_csv_path(penn_split_csv)
-    df_split = PENN_Dataset3D.load_split(split_path, fold=fold, split=None)
+    df_split = PENN_Dataset3D.load_split(
+        split_path,
+        fold=fold,
+        split=None,
+        high_risk_policy=high_risk_policy,
+        dcis_policy=dcis_policy,
+    )
     df_split = df_split[['UID', 'Split', 'Malignant']].copy()
     df_split['GT'] = df_split['Malignant'].astype(int)
 
@@ -546,6 +554,22 @@ def main() -> None:
         default=0,
         help='MST CV fold index (must match the fine-tuned checkpoint used for embeddings).',
     )
+    parser.add_argument(
+        '--high-risk-policy',
+        dest='high_risk_policy',
+        type=str,
+        default='exclude',
+        choices=('malignant', 'benign', 'exclude'),
+        help="Treat datasplit 'high risk' as malignant, benign, or drop. Default: exclude.",
+    )
+    parser.add_argument(
+        '--dcis-policy',
+        dest='dcis_policy',
+        type=str,
+        default='malignant',
+        choices=('malignant', 'benign', 'exclude'),
+        help="Treat datasplit 'dcis' as malignant, benign, or drop. Default: malignant.",
+    )
     cli = parser.parse_args()
 
     embeddings_dir, labels_path = _resolve_predict_paths(
@@ -577,7 +601,13 @@ def main() -> None:
 
     if cli.eval_mode == 'penn_split':
         merged = load_embeddings_for_penn_split(
-            embeddings_dir, cli.penn_split_csv, cli.fold, to_exclude, one_side=ONE_SIDE
+            embeddings_dir,
+            cli.penn_split_csv,
+            cli.fold,
+            to_exclude,
+            one_side=ONE_SIDE,
+            high_risk_policy=cli.high_risk_policy,
+            dcis_policy=cli.dcis_policy,
         )
         run_penn_split_eval(merged, cli.fold, results_dir, device)
     else:

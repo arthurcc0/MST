@@ -33,7 +33,8 @@ from mst.data.datasets.dataset_3d_penn import PENN_DataModule, PENN_Dataset3D
 from mst.data.datamodules import DataModule
 from mst.models.resnet import ResNet, ResNetSliceTrans
 from mst.models.dino import DinoClassifierSlice, DinoClassifierPaired, DinoTxtClassifier
-from mst.models.dino_v3 import DinoClassifierSliceV3
+from mst.models.dino_common import load_compatible_state_dict, normalize_dino_size
+from mst.models.dino_v3 import DINOV3_HF_IDS, DinoClassifierSliceV3
 from mst.losses.focal_loss import FocalLoss
 from mst.utils.random_seed import set_random_seed
 
@@ -184,8 +185,11 @@ if __name__ == "__main__":
         '--model_size',
         type=str,
         default='s',
-        choices=['s', 'b', 'l', 'g'],
-        help='DINO ViT backbone size: s/b/l for DINOv2 and DINOv3; g is DINOv2 giant only (default: s).',
+        choices=['s', 'small', 'b', 'base', 'l', 'large', 'g', 'giant'],
+        help=(
+            "DINO ViT backbone: s/small, b/base, l/large, g/giant. "
+            "DINOv2 supports s/b/l/g; DINOv3 supports s/b/l (default: s)."
+        ),
     )
     parser.add_argument('--use_registers', type=lambda x: str(x).lower() == 'true', nargs='?', const=True, default=False,help='Load DINOv2 backbone with 4 register tokens (Darcet et al., 2023).')
     parser.add_argument('--path_root_output', type=str, default='./runs', help="Root output path")
@@ -213,6 +217,29 @@ if __name__ == "__main__":
             "PENN train/val split CSV (Fold, Split, UID, Malignant, …). "
             "Filename under PENN_Dataset3D.AUX_PATH or absolute path. "
             "Default: new_penn_datasplit.csv. Use old_penn_datasplit.csv for legacy cohort."
+        ),
+    )
+    parser.add_argument(
+        '--high-risk-policy',
+        dest='high_risk_policy',
+        type=str,
+        default='exclude',
+        choices=('malignant', 'benign', 'exclude'),
+        help=(
+            "How to treat datasplit rows with label 'high risk' at load time: "
+            "count as malignant, benign, or drop. Does not rewrite the split CSV. "
+            "Default: exclude."
+        ),
+    )
+    parser.add_argument(
+        '--dcis-policy',
+        dest='dcis_policy',
+        type=str,
+        default='malignant',
+        choices=('malignant', 'benign', 'exclude'),
+        help=(
+            "How to treat datasplit rows with label 'dcis' at load time: "
+            "count as malignant, benign, or drop. Default: malignant."
         ),
     )
     parser.add_argument(
@@ -336,6 +363,12 @@ if __name__ == "__main__":
         ),
     )
     args = parser.parse_args()
+    args.model_size = normalize_dino_size(args.model_size)
+    if args.model_name == 'DinoClassifierSliceV3' and args.model_size not in DINOV3_HF_IDS:
+        parser.error(
+            f"--model_size {args.model_size!r} is not available for DinoClassifierSliceV3; "
+            f"use {sorted(DINOV3_HF_IDS)}."
+        )
 
     deterministic_mode = {'true': True, 'warn': 'warn', 'false': False}[args.deterministic]
 
@@ -355,6 +388,7 @@ if __name__ == "__main__":
     input_tag = str(args.input_type).strip().replace(' ', '_') or 'subtraction'
     registers_tag = '_reg' if args.use_registers else ''
     v3_tag = '_v3' if args.model_name == 'DinoClassifierSliceV3' else ''
+    size_tag = '' if args.model_size == 's' else f'_vit{args.model_size}'
     # Encode the slice count in the run directory name so prediction can auto-detect it.
     slices_tag = '' if args.slices == 32 else f'_d{args.slices}'
     multi_tag = '_multi' if args.use_clinical_notes else ''
@@ -362,7 +396,7 @@ if __name__ == "__main__":
     if args.cohort:
         cohort_tag = '_' + str(args.cohort).strip().replace(' ', '_')
     path_run_dir = Path(args.path_root_output) / args.dataset / (
-        f'{args.model_name}_{current_time}_{input_tag}{cohort_tag}{v3_tag}{registers_tag}{slices_tag}{multi_tag}'
+        f'{args.model_name}_{current_time}_{input_tag}{cohort_tag}{v3_tag}{size_tag}{registers_tag}{slices_tag}{multi_tag}'
     )
     path_run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -380,10 +414,13 @@ if __name__ == "__main__":
             'dataset': args.dataset,
             'model_name': args.model_name,
             'model_size': args.model_size,
+            'use_registers': args.use_registers,
             'fold': args.fold,
             'cohort': args.cohort,
             'penn_split_csv': str(penn_split_csv_path),
             'split_csv_path': str(penn_split_csv_path),
+            'high_risk_policy': args.high_risk_policy,
+            'dcis_policy': args.dcis_policy,
             'path_root_data': args.path_root_data,
             'slices': args.slices,
             'input_type': args.input_type,
@@ -467,6 +504,8 @@ if __name__ == "__main__":
     model_kwargs.pop('path_root_output', None)
     model_kwargs.pop('cohort', None)
     model_kwargs.pop('penn_split_csv', None)
+    model_kwargs.pop('high_risk_policy', None)
+    model_kwargs.pop('dcis_policy', None)
     model_kwargs.pop('fold', None)
     model_kwargs.pop('freeze_backbone', None)
     model_kwargs.pop('unfreeze_encoder_blocks', None)
@@ -488,6 +527,11 @@ if __name__ == "__main__":
         model_kwargs['freeze'] = args.freeze_backbone
     if model_name == 'DinoClassifierSliceV3' and args.use_registers:
         print("Note: --use_registers applies to DINOv2 only; DINOv3 always uses 4 register tokens.")
+    if args.model_size in {'l', 'g'}:
+        print(
+            f"Note: DINO ViT-{args.model_size} runs 32 RGB slices per volume. "
+            f"If you OOM, lower --batch_size (current {args.batch_size})."
+        )
     model_kwargs['loss'] = loss_cls
     model_kwargs['loss_kwargs'] = loss_kwargs
 
@@ -499,7 +543,7 @@ if __name__ == "__main__":
     log_every_n_steps = 50
     logger = WandbLogger(
         project=f'Classifier_{args.dataset}_MST',
-        name=f'{type(model).__name__}_{input_tag}{cohort_tag}{registers_tag}{slices_tag}',
+        name=f'{type(model).__name__}_{input_tag}{cohort_tag}{size_tag}{registers_tag}{slices_tag}',
         log_model=False,
     )
     lr_monitor = LearningRateMonitor(logging_interval='step')
@@ -541,10 +585,26 @@ if __name__ == "__main__":
         print(f"Loading weights from checkpoint: {args.ckpt_path}")
         checkpoint = torch.load(args.ckpt_path, map_location=torch.device('cpu'), weights_only=False)
         # Use the custom loader for the paired model, and standard loading for others
+        state_dict = checkpoint['state_dict'] if isinstance(checkpoint, dict) and 'state_dict' in checkpoint else checkpoint
         if isinstance(model, DinoClassifierPaired):
-            model.load_weights(checkpoint['state_dict'])
+            model.load_weights(state_dict)
         else:
-            model.load_state_dict(checkpoint['state_dict'], strict=False)
+            report = load_compatible_state_dict(model, state_dict)
+            print(
+                f"Checkpoint load: {report['loaded']} tensors matched, "
+                f"{len(report['missing'])} missing, "
+                f"{len(report['unexpected'])} unexpected, "
+                f"{len(report['skipped_shape'])} skipped (shape mismatch)."
+            )
+            if report['skipped_shape'][:8]:
+                print("  shape-mismatch examples:")
+                for item in report['skipped_shape'][:8]:
+                    print(f"    {item}")
+            if report['skipped_shape']:
+                print(
+                    "Note: encoder tensors from a different DINO size were not loaded; "
+                    "the hub-pretrained larger backbone is kept."
+                )
 
     if args.unfreeze_encoder_blocks > 0 and hasattr(model, 'unfreeze_encoder_last_blocks'):
         n = model.unfreeze_encoder_last_blocks(args.unfreeze_encoder_blocks)

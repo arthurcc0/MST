@@ -5,6 +5,8 @@ import torch.utils.data as data
 import torchio as tio
 import torch
 
+from mst.data.split_label_policy import apply_split_label_policies
+
 from .augmentations.augmentations_3d import ImageOrSubjectToTensor, RescaleIntensity, ZNormalization, CropOrPad
 def identity_transform(x):
     return x
@@ -33,6 +35,8 @@ class PENN_DataModule(pl.LightningDataModule):
         penn_split_csv=None,
         split_csv=None,
         seed: int = 42,
+        high_risk_policy: str = "exclude",
+        dcis_policy: str = "malignant",
         **kwargs,
     ):
         super().__init__()
@@ -46,6 +50,8 @@ class PENN_DataModule(pl.LightningDataModule):
         self.with_laterality = with_laterality
         self.use_clinical_notes = use_clinical_notes
         self.clinical_notes_path = clinical_notes_path
+        self.high_risk_policy = high_risk_policy
+        self.dcis_policy = dcis_policy
         self.split_csv_path = PENN_Dataset3D.resolve_split_csv_path(penn_split_csv or split_csv)
 
         # Forward only kwargs that PENN_Dataset3D.__init__ actually accepts.
@@ -55,8 +61,17 @@ class PENN_DataModule(pl.LightningDataModule):
         self.dataset_kwargs = {k: v for k, v in kwargs.items() if k in _allowed}
 
     def setup(self, stage=None):
-        df_full = PENN_Dataset3D.load_split(self.split_csv_path, fold=self.fold, fraction=self.fraction)
-        print(f"[PENN_DataModule] split CSV: {self.split_csv_path} (fold={self.fold})")
+        df_full = PENN_Dataset3D.load_split(
+            self.split_csv_path,
+            fold=self.fold,
+            fraction=self.fraction,
+            high_risk_policy=self.high_risk_policy,
+            dcis_policy=self.dcis_policy,
+        )
+        print(
+            f"[PENN_DataModule] split CSV: {self.split_csv_path} (fold={self.fold}, "
+            f"high_risk_policy={self.high_risk_policy!r}, dcis_policy={self.dcis_policy!r})"
+        )
 
         df_train_all = df_full[df_full['Split'] == 'train']
         df_val = df_full[df_full['Split'] == 'val']
@@ -316,11 +331,29 @@ class PENN_Dataset3D(data.Dataset):
             return "No specific clinical findings documented for this case."
 
     @classmethod
-    def load_split(cls, filepath_or_buffer=None, fold=0, split=None, fraction=None):
+    def load_split(
+        cls,
+        filepath_or_buffer=None,
+        fold=0,
+        split=None,
+        fraction=None,
+        high_risk_policy: str = "malignant",
+        dcis_policy: str = "malignant",
+    ):
         df = pd.read_csv(filepath_or_buffer)
         df = df[df['Fold'] == fold]
         if split is not None:
-            df = df[df['Split'] == split]   
+            df = df[df['Split'] == split]
+        n_before = len(df)
+        df = apply_split_label_policies(
+            df, high_risk_policy=high_risk_policy, dcis_policy=dcis_policy
+        )
+        n_dropped = n_before - len(df)
+        if n_dropped:
+            print(
+                f"[PENN_Dataset3D] dropped {n_dropped} rows "
+                f"(high_risk_policy={high_risk_policy!r}, dcis_policy={dcis_policy!r})"
+            )
         if fraction is not None:
             df = df.sample(frac=fraction, random_state=0).reset_index()
         return df
