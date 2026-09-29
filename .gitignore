@@ -59,6 +59,9 @@ dinov2/
 /wandb
 results*
 evaluation_results*
+/experiments/logs/
+/experiments/summary.xlsx
+/experiments/orphans.csv
 
 # Build / cache
 /docs/build

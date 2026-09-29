@@ -31,8 +31,11 @@ Two depth-handling modes are supported:
   depth axis. Mask is applied **before** MIP so background voxels can't
   dominate ``max``. When the source depth is insufficient to fit
   ``--num_slabs`` slabs, the available slabs are still centered and the
-  first/last slab are repeated to reach ``--num_slabs``. Output folder is
-  ``final_cropped_and_masked_slabs_n{N}_s{S}_o{O}``.
+  stack is padded to ``--num_slabs`` with all-zero slabs (``--slab_pad zero``,
+  default; same value as the masked background) or by repeating the
+  first/last slab (``--slab_pad edge``, the original behaviour). Output folder
+  is ``final_cropped_and_masked_slabs_n{N}_s{S}_o{O}`` for ``edge`` and
+  ``..._n{N}_s{S}_o{O}_pad0`` for ``zero``, so the two never share a folder.
 """
 
 import argparse
@@ -70,7 +73,8 @@ TARGET_HEIGHT = TARGET_SHAPE[0]
 OUT_ROOT = OUT_ROOT_BASE / "final_cropped_and_masked_data"
 
 # Slab-mode defaults. Activated when SLAB_PARAMS is not None (driven by --slabs).
-DEFAULT_SLAB_PARAMS = dict(num_slabs=32, slab_size=3, overlap=0)
+DEFAULT_SLAB_PARAMS = dict(num_slabs=32, slab_size=3, overlap=0, pad_mode="zero")
+SLAB_PAD_MODES = ("zero", "edge")
 
 MASK_KEY = "data"  # key inside the mask .npz
 ROTATE_MASK_DEG = 0  # set to 90 if mask orientation differs from the volume
@@ -98,23 +102,27 @@ def _load_mask_npz(path: Path) -> np.ndarray:
         raise KeyError(f"Key '{MASK_KEY}' not found in {path}; got {list(npz.files)}")
 
 
-def _compute_slabs(volume_3d: np.ndarray, num_slabs: int, slab_size: int, overlap: int):
+def _compute_slabs(volume_3d: np.ndarray, num_slabs: int, slab_size: int, overlap: int,
+                   pad_mode: str = "zero"):
     """Compute MIP slabs along the last axis.
 
     Each output slab is ``volume_3d[..., a:a+slab_size].max(axis=-1)``. The
     window of slabs is centered on the depth axis. If the source depth ``D``
     cannot fit ``num_slabs`` slabs at the requested overlap, we compute as
-    many as fit (still centered) and then repeat the first/last slab to
-    pad the output up to ``num_slabs``.
+    many as fit (still centered) and pad the output up to ``num_slabs`` with
+    zero slabs (``pad_mode='zero'``) or first/last-slab repeats (``'edge'``).
 
     Returns
     -------
     out : np.ndarray of shape ``volume_3d.shape[:-1] + (num_slabs,)``,
           or ``None`` when ``D < slab_size`` (cannot build a single slab).
-    record : dict with keys ``status`` ('ok' | 'padded_edges' | 'too_shallow'),
-             ``depth`` (source D), ``k_native`` (slabs computed before edge
-             repeats), ``pre_pad`` and ``post_pad`` (edge-repeat counts).
+    record : dict with keys ``status`` ('ok' | 'padded_zero' | 'padded_edges'
+             | 'too_shallow'), ``depth`` (source D), ``k_native`` (slabs
+             computed from the volume), ``pre_pad`` and ``post_pad`` (padded
+             slab counts).
     """
+    if pad_mode not in SLAB_PAD_MODES:
+        raise ValueError(f"pad_mode must be one of {SLAB_PAD_MODES}; got {pad_mode!r}")
     S, N, O = int(slab_size), int(num_slabs), int(overlap)
     stride = S - O
     if stride < 1:
@@ -148,27 +156,32 @@ def _compute_slabs(volume_3d: np.ndarray, num_slabs: int, slab_size: int, overla
         a = start + i * stride
         native[..., i] = volume_3d[..., a : a + S].max(axis=-1)
 
+    record["k_native"] = k
     if k < N:
-        # Fewer slabs fit than requested. Keep the native slabs centered in the
-        # source volume and pad to N by repeating the first/last slab; the
-        # repeats themselves are also split as evenly as possible around the
-        # native block, so the final stack of N slabs stays centered.
+        # Fewer slabs fit than requested. Keep the native slabs centered and
+        # split the padding as evenly as possible around them, so the final
+        # stack of N slabs stays centered.
         n_missing = N - k
         pre = n_missing // 2
         post = n_missing - pre
-        out = np.empty(wh + (N,), dtype=native.dtype)
-        out[..., :pre] = native[..., :1]
+        out = np.zeros(wh + (N,), dtype=native.dtype)
         out[..., pre : pre + k] = native
-        out[..., pre + k :] = native[..., -1:]
-        record.update(status="padded_edges", pre_pad=pre, post_pad=post)
+        if pad_mode == "edge":
+            out[..., :pre] = native[..., :1]
+            out[..., pre + k :] = native[..., -1:]
+        record.update(
+            status="padded_edges" if pad_mode == "edge" else "padded_zero",
+            pre_pad=pre,
+            post_pad=post,
+        )
         return out, record
 
-    record["k_native"] = k
     return native, record
 
 
-def _slab_source_depth_span(D: int, num_slabs: int, slab_size: int, overlap: int) -> dict:
-    """Source D indices covered by the centered native slab window (before edge repeat)."""
+def _slab_source_depth_span(D: int, num_slabs: int, slab_size: int, overlap: int,
+                            pad_mode: str = "zero") -> dict:
+    """Source D indices covered by the centered native slab window (before padding)."""
     S, N, O = int(slab_size), int(num_slabs), int(overlap)
     stride = S - O
     record = {"source_depth_D": int(D), "slab_stride": stride, "slab_size": S}
@@ -497,7 +510,8 @@ def _summarize_slab_stats(records: list, out_csv: Path, slab_params: dict) -> No
             writer.writerow({k: r.get(k, "") for k in fieldnames})
 
     ok = sum(1 for r in records if r["status"] == "ok")
-    padded = sum(1 for r in records if r["status"] == "padded_edges")
+    padded = sum(1 for r in records if r["status"] in ("padded_edges", "padded_zero"))
+    pad_desc = "first/last slab repeated" if slab_params["pad_mode"] == "edge" else "zero slabs added"
     too_shallow = sum(1 for r in records if r["status"] == "too_shallow")
     depths = [r["depth"] for r in records]
     stride = slab_params["slab_size"] - slab_params["overlap"]
@@ -507,7 +521,7 @@ def _summarize_slab_stats(records: list, out_csv: Path, slab_params: dict) -> No
         "\n[slab summary] (image, side) records:"
         f"\n  total:        {len(records)}"
         f"\n  ok:           {ok}    (D >= {primary_req})"
-        f"\n  padded_edges: {padded} (D < {primary_req}; first/last slab repeated)"
+        f"\n  padded:       {padded} (D < {primary_req}; {pad_desc})"
         f"\n  too_shallow:  {too_shallow} (D < {slab_params['slab_size']}; skipped)"
         f"\n  source depth: min={min(depths)}, median={median(depths):.1f}, "
         f"mean={mean(depths):.1f}, max={max(depths)}"
@@ -538,7 +552,7 @@ def main(
         print(f"[DEBUG_SINGLE] only processing: {[p.name for p in patient_dirs]}")
     mode_desc = (
         f"slab mode (N={slab_params['num_slabs']}, S={slab_params['slab_size']}, "
-        f"O={slab_params['overlap']})"
+        f"O={slab_params['overlap']}, pad={slab_params['pad_mode']})"
         if slab_params is not None
         else f"slice mode (target_shape={target_shape})"
     )
@@ -608,6 +622,9 @@ if __name__ == "__main__":
     parser.add_argument('--overlap', type=int, default=DEFAULT_SLAB_PARAMS['overlap'],
                         help='Slice overlap between consecutive slabs. Must be < slab_size. '
                              'Stride between slabs = slab_size - overlap.')
+    parser.add_argument('--slab_pad', choices=SLAB_PAD_MODES, default=DEFAULT_SLAB_PARAMS['pad_mode'],
+                        help="How to fill slabs beyond the source depth: 'zero' (default; folder suffix "
+                             "_pad0) or 'edge' (repeat first/last slab; original, unsuffixed folders).")
     parser.add_argument(
         '--num_workers',
         type=int,
@@ -649,6 +666,7 @@ if __name__ == "__main__":
             num_slabs=int(cli_args.num_slabs),
             slab_size=int(cli_args.slab_size),
             overlap=int(cli_args.overlap),
+            pad_mode=cli_args.slab_pad,
         )
         if cli_args.out_dir is not None:
             cli_out_root = Path(cli_args.out_dir)
@@ -658,6 +676,7 @@ if __name__ == "__main__":
                 f"_n{cli_slab_params['num_slabs']}"
                 f"_s{cli_slab_params['slab_size']}"
                 f"_o{cli_slab_params['overlap']}"
+                f"{'_pad0' if cli_slab_params['pad_mode'] == 'zero' else ''}"
             )
     else:
         cli_slab_params = None

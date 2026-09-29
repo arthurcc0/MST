@@ -39,32 +39,35 @@ OUT_ROOT = Path(r"D:\Users\arthur\Data\MST_birads4")
 DEFAULT_DEPTH = 32
 
 # For new Penn data (BIRADS-4):
-LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\tables\matches_birads4_all_v5_noBenHR.xlsx")
-MAPPING_CSV = OUT_ROOT / "new_penn_mapping_v5_noBenHR.csv"
-OUTPUT_CSV = OUT_ROOT / "new_penn_datasplit_v5_noBenHR.csv"
-FINAL_DATA_DIR = OUT_ROOT / "final_cropped_and_masked_slabs_n32_s3_o0"
-
-COL_NEWACC = "newaccession"
-COL_LATERALITY = "lat"
-COL_LABEL = "label"
-COL_PATIENT = "MRN"
-# Stored Malignant flag only. Prefer malignant/benign so every label stays in
-# the CSV; toggle exclude at train/predict load time instead of writing noHR.
-HIGH_RISK_POLICY = "malignant"  # or "benign" / "exclude"
-DCIS_POLICY = "malignant"  # or "benign" / "exclude"
-
-# For old Penn data (all BI-RADS):
-# LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\table_utils\lat_added_dummy_ehr_chat_no_birads4_v2.csv")
-# MAPPING_CSV = OUT_ROOT / "old_penn_mapping_v2.csv"
-# OUTPUT_CSV = OUT_ROOT / "old_penn_datasplit_v2.csv"
+# LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\tables\matches_birads4_all_v5_noBenHR.xlsx")
+# MAPPING_CSV = OUT_ROOT / "new_penn_mapping_v5_noBenHR.csv"
+# OUTPUT_CSV = OUT_ROOT / "new_penn_datasplit_v5_noBenHR.csv"
 # FINAL_DATA_DIR = OUT_ROOT / "final_cropped_and_masked_slabs_n32_s3_o0"
 
-# COL_NEWACC = "dummy_acc"
-# COL_LATERALITY = "lat"  # canonical name from new_penn_mapping.py / old_penn_mapping.csv
+# COL_NEWACC = "newaccession"
+# COL_LATERALITY = "lat"
 # COL_LABEL = "label"
 # COL_PATIENT = "MRN"
-# HIGH_RISK_POLICY = "exclude"
-# DCIS_POLICY = "exclude"
+# # Stored Malignant flag only. Prefer malignant/benign so every label stays in
+# # the CSV; toggle exclude at train/predict load time instead of writing noHR.
+# HIGH_RISK_POLICY = "malignant"  # or "benign" / "exclude"
+# DCIS_POLICY = "malignant"  # or "benign" / "exclude"
+
+# For old Penn data (all BI-RADS):
+LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\table_utils\lat_added_dummy_ehr_chat_no_birads4_v2.csv")
+MAPPING_CSV = OUT_ROOT / "old_penn_mapping.csv"
+OUTPUT_CSV = OUT_ROOT / "old_penn_datasplit.csv"
+FINAL_DATA_DIR = OUT_ROOT / "final_cropped_and_masked_slabs_n32_s3_o0"
+
+COL_NEWACC = "dummy_acc"
+COL_LATERALITY = "lat"  # canonical name from new_penn_mapping.py / old_penn_mapping.csv
+COL_LABEL = "label"
+COL_PATIENT = "MRN"
+HIGH_RISK_POLICY = "exclude" # In old Penn, high risk cases correspond to BIRADS 0, 2, and 3 so we exclude them
+DCIS_POLICY = "malignant"
+
+# Copied to the split CSV when present in the mapping / label table.
+PASSTHROUGH_COLS = ("studylevelassessment",)
 
 N_FOLDS = 5
 RANDOM_STATE_OUTER = 0
@@ -245,7 +248,10 @@ def main(
     else:
         print(f"Grouping patients by {COL_PATIENT}.")
 
-    df = df[[COL_NEWACC, COL_LATERALITY, COL_LABEL, COL_PATIENT]].drop_duplicates(subset=[COL_NEWACC])
+    passthrough = [c for c in PASSTHROUGH_COLS if c in df.columns]
+    df = df[[COL_NEWACC, COL_LATERALITY, COL_LABEL, COL_PATIENT, *passthrough]].drop_duplicates(
+        subset=[COL_NEWACC]
+    )
 
     # Normalize the ``lat`` string column ('left' / 'right' / 'null'). Drop
     # cases with missing laterality (NaN or 'null'): they are reserved for
@@ -296,6 +302,7 @@ def main(
             "Malignant": df["Malignant"].values,
             COL_LABEL: df[COL_LABEL].values,
             COL_PATIENT: df[COL_PATIENT].values,
+            **{c: df[c].values for c in passthrough},
             "_stratum": df["_stratum"].values,
         }
     )

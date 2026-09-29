@@ -223,12 +223,12 @@ if __name__ == "__main__":
         '--high-risk-policy',
         dest='high_risk_policy',
         type=str,
-        default='exclude',
+        default='malignant',
         choices=('malignant', 'benign', 'exclude'),
         help=(
             "How to treat datasplit rows with label 'high risk' at load time: "
             "count as malignant, benign, or drop. Does not rewrite the split CSV. "
-            "Default: exclude."
+            "Default: malignant."
         ),
     )
     parser.add_argument(
@@ -423,6 +423,9 @@ if __name__ == "__main__":
             'dcis_policy': args.dcis_policy,
             'path_root_data': args.path_root_data,
             'slices': args.slices,
+            'slab_tissue_soft_weight': args.slab_tissue_soft_weight,
+            'slab_tissue_min_weight': args.slab_tissue_min_weight,
+            'slab_tissue_keep_ratio': args.slab_tissue_keep_ratio,
             'input_type': args.input_type,
             'only_malignants': args.only_malignants,
             'ckpt_init': args.ckpt_path,

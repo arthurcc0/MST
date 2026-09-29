@@ -68,8 +68,8 @@ OUT_ROOT = Path(r"D:\Users\arthur\Data\MST_birads4")
 
 # --- Old Penn (EHR / dummy export) — swap in by commenting New Penn above ---
 LABEL_TABLE = Path(r"D:\Users\arthur\Projects\MST\table_utils\lat_added_dummy_ehr_chat_no_birads4_v2.csv")
-OUTPUT_CSV = OUT_ROOT / "old_penn_mapping_v2.csv"
-HOLDOUT_CSV = OUT_ROOT / "old_penn_holdout_v2.csv"
+OUTPUT_CSV = OUT_ROOT / "old_penn_mapping.csv"
+HOLDOUT_CSV = OUT_ROOT / "old_penn_holdout.csv"
 COL_NEWACC = "dummy_acc"
 COL_LATERALITY = "laterality"
 COL_LABEL = "label"

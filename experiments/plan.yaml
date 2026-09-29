@@ -1,0 +1,347 @@
+# PENN BI-RADS-4 experiment plan — the only file to edit.
+#
+#   python scripts/experiments/run_plan.py status             # what is done / blocked
+#   python scripts/experiments/run_plan.py run --phase 3 --machine cluster --dry-run
+#   python scripts/experiments/run_plan.py run --phase 3 --machine cluster
+#
+# On SLURM always pass --machine cluster (compute-node hostnames are not stable).
+#
+# Every experiment is 5-fold CV on the new-Penn (BI-RADS-4) folds. Its train
+# cohort is "<cohort>_f<fold>"; runs already on disk with that cohort tag are
+# picked up and never retrained. summary.csv / summary.xlsx are regenerated
+# from disk, so do not edit them by hand.
+#
+# Model selection: rank configs by val_auc_mean (new-Penn val per fold) and read
+# test_auc_* only for the configs you carry forward. Choosing the best of many
+# configs by test AUC makes the reported test AUC optimistic.
+#
+# Templates: any string may use {field} from the experiment's train settings or
+# grid values, e.g. id: "P3_joint_{model_size}".
+
+machines:
+  default:                      # this workstation
+    python: null                # null = interpreter running run_plan.py
+    data_root: D:\Users\arthur\Data\MST_birads4
+    runs_root: runs
+    predict_output_dir: .
+  # GPU-SERVER-HOSTNAME:        # key = output of `hostname` on that machine
+  #   python: C:\path\to\envs\mst\python.exe
+  #   data_root: E:\MST_birads4
+  #   runs_root: E:\MST_runs
+  #   predict_output_dir: E:\MST_results
+  cluster:                      # SLURM: pass --machine cluster (hostnames change per node)
+    python: null                # interpreter that launches run_plan.py
+    # Edit these three paths for the cluster. data_root holds the .h5 and the split CSVs.
+    data_root: /scratch/arthur/MST_birads4
+    runs_root: /scratch/arthur/MST_runs
+    predict_output_dir: /scratch/arthur/MST_results
+    train_overrides:            # this machine only; run names / summary keep plan values
+      path_root_data: "{path_root_data}.h5"
+      num_workers: 8
+    predict_overrides: {}
+
+defaults:
+  folds: [0, 1, 2, 3, 4]
+  train:
+    dataset: PENN
+    model_name: DinoClassifierSlice
+    model_size: s
+    use_registers: true
+    input_type: subtraction
+    path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+    slices: 32
+    slab_tissue_soft_weight: true
+    high_risk_policy: malignant
+    dcis_policy: malignant
+    num_workers: 2
+    seed: 123
+    # Same rule for every recipe from phase 2 on; the loss itself is swept in phase 5.
+    # Weights come from each train fold's labels, so the malignant:benign ratio
+    # is ~1.5 for stage 2, ~6.6 for joint and ~11.7 for stage 1.
+    class_weight: balanced
+    # No gradient accumulation in main_train: smaller batches for larger ViTs
+    # also change the optimization. Keep sizes fixed within a comparison.
+    batch_size_by_model_size: {s: 8, b: 4, l: 2, g: 1}
+  eval:
+    splits: [val, test]
+    high_risk_policy: malignant  # score HR as malignant (matches reported n=205/204 test sets)
+    dcis_policy: malignant
+
+experiments:
+
+  # ======================================================================
+  # Phase 1 — joint vs staged, ViT-S, old-Penn split v2 (accession-level)
+  # Archived: superseded by phase 2 (stage 1 overlapped new-Penn test
+  # patients; class weighting differed between recipes). Kept as the record
+  # of the preliminary result and so `orphans` keeps its runs; not rerun.
+  # ======================================================================
+  - id: P1_stage1_oldpenn_s
+    phase: 1
+    enabled: false
+    description: Stage 1 — DINOv2-S full fine-tune on old Penn fold 0 (existing run).
+    cohort: old_penn_balancedCE_seed123
+    folds: [0]
+    eval: false                  # target is BI-RADS-4; old-Penn test not needed here
+    train:
+      penn_split_csv: old_penn_datasplit_v2.csv
+      class_weight: balanced
+      high_risk_policy: exclude
+      slab_tissue_soft_weight: false
+
+  - id: P1_staged_s
+    phase: 1
+    enabled: false
+    description: Stage 2 retrained 2026-09-23 with HR as malignant (seed 42) from the old fold-0 stage 1.
+    note: >-
+      Stage 1 trained on old exams of ~17-24% of new-Penn test patients (no patient
+      exclusion); joint had the leak guard. Phase 1 is therefore tilted toward staged.
+    cohort: birads4_pennPreTr123_frozebckbn_unfrz2_notBalCE_slabW_vNoBenHR_lr1x10-5
+    init_from: {experiment: P1_stage1_oldpenn_s, fold: 0}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+      class_weight: none
+      seed: 42
+
+  - id: P1_stage1_oldpenn_s_slabW
+    phase: 1
+    enabled: false
+    description: Stage 1 — DINOv2-S full fine-tune on old Penn fold 0, slab weighting on, seed 123 (existing run).
+    cohort: old_penn_balancedCE_seed123_slabW
+    folds: [0]
+    eval: false
+    train:
+      penn_split_csv: old_penn_datasplit_v2.csv
+      class_weight: balanced
+      high_risk_policy: exclude   # old split has no HR rows; kept for clarity
+
+  - id: P1_staged_s_hrMal
+    phase: 1
+    enabled: false
+    note: Optional seed/base repeat; phase 2 replicates over old-Penn folds replace it.
+    description: Stage 2 aligned with joint — HR as malignant, seed 123, from the slab-weighted stage 1.
+    init_from: {experiment: P1_stage1_oldpenn_s_slabW, fold: 0}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+      class_weight: none
+      high_risk_policy: malignant
+
+  - id: P1_joint_s
+    phase: 1
+    enabled: false
+    description: Single stage — old fold-0 train+val grafted into every new fold, full fine-tune.
+    cohort: joint_penn_oldF0_v5_noBenHR_slabW_seed123_balCE
+    train:
+      penn_split_csv: joint_penn_datasplit_v5.csv
+      class_weight: balanced
+      high_risk_policy: malignant
+
+  # ======================================================================
+  # Phase 2 — staged vs joint on a clean old-Penn split, replicated over
+  # old-Penn folds 0-2 (each replicate = a different old train+val draw).
+  # Same recipe on both sides: balanced CE, slab weighting, seed 123, HR as
+  # malignant on new Penn (old Penn has no HR rows: excluded in step3).
+  # Old-Penn fold 0 of this phase becomes the fixed stage-1 base for phases 3+.
+  # Data files (the runner blocks until they exist):
+  #   1. step3_create_split.py (old profile, MRN groups, HR exclude)
+  #        -> old_penn_datasplit.csv
+  #   2. step3b_exclude_new_penn_patients.py  (drops old exams of new-Penn split patients)
+  #        -> old_penn_datasplit_noNewPenn.csv
+  #   3. for k in 0 1 2:
+  #        make_joint_datasplit.py --old-source-fold k --output-csv ...joint_penn_datasplit_oldF{k}.csv
+  # Compare each replicate with compare_cv_models.py, then report all three.
+  # ======================================================================
+  - id: P2_stage1_oldpenn_s
+    phase: 2
+    description: Stage 1 on the clean MRN old split; fold k = old-Penn fold k.
+    folds: [0, 1, 2]
+    eval: false
+    train:
+      penn_split_csv: old_penn_datasplit_noNewPenn.csv
+      high_risk_policy: exclude
+
+  - id: P2_staged_s_oldF{old_fold}
+    phase: 2
+    description: Stage 2 from the old-fold-{old_fold} stage-1 ckpt (P1 recipe, balanced CE).
+    vars: {old_fold: [0, 1, 2]}
+    init_from: {experiment: P2_stage1_oldpenn_s, fold: "{old_fold}"}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+
+  - id: P2_stage1_on_newpenn_oldF{old_fold}
+    phase: 2
+    description: Stage-1 only (no BI-RADS-4 fine-tune), scored on the new-Penn folds.
+    vars: {old_fold: [0, 1, 2]}
+    eval_from: {experiment: P2_stage1_oldpenn_s, fold: "{old_fold}"}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
+      high_risk_policy: malignant
+
+  - id: P2_joint_s_oldF{old_fold}
+    phase: 2
+    description: Joint with old-fold-{old_fold} train+val grafted into every new fold.
+    vars: {old_fold: [0, 1, 2]}
+    train:
+      penn_split_csv: joint_penn_datasplit_oldF{old_fold}.csv
+
+  # ======================================================================
+  # Phase 3 — backbone size. Enable ONE strategy (whichever wins phase 2).
+  # Add g only if s -> b -> l keeps improving val AUC.
+  # ======================================================================
+  - id: P3_joint_{model_size}
+    phase: 3
+    enabled: false
+    description: Joint, DINOv2-{model_size}.
+    grid: {model_size: [s, b, l]}
+    train:
+      penn_split_csv: joint_penn_datasplit_oldF0.csv
+
+  - id: P3_stage1_oldpenn_{model_size}
+    phase: 3
+    enabled: false
+    description: Stage 1, DINOv2-{model_size}, old fold 0 (s reuses the phase 2 base).
+    cohort: P2_stage1_oldpenn_{model_size}
+    grid: {model_size: [s, b, l]}
+    folds: [0]
+    eval: false
+    train:
+      penn_split_csv: old_penn_datasplit_noNewPenn.csv
+      high_risk_policy: exclude
+
+  - id: P3_staged_{model_size}
+    phase: 3
+    enabled: false
+    description: Stage 2, DINOv2-{model_size}.
+    grid: {model_size: [s, b, l]}
+    init_from: {experiment: "P3_stage1_oldpenn_{model_size}", fold: 0}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+
+  # ======================================================================
+  # Phase 4 — fine-tuning depth and learning rates, per chosen size.
+  # Screen on 2 folds first:  run --phase 4 --folds 0 1
+  # ======================================================================
+  - id: P4_staged_{model_size}_unfrz{unfreeze_encoder_blocks}_lr{learning_rate}_enc{encoder_lr}
+    phase: 4
+    enabled: false
+    description: Stage 2 sweep, DINOv2-{model_size}.
+    grid:
+      model_size: [s]
+      unfreeze_encoder_blocks: [0, 1, 2, 4]
+      learning_rate: [1.0e-5, 1.0e-4]
+      encoder_lr: [1.0e-6, 1.0e-5]
+    init_from: {experiment: "P3_stage1_oldpenn_{model_size}", fold: 0}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
+
+  - id: P4_joint_{model_size}_lr{learning_rate}_enc{encoder_lr}
+    phase: 4
+    enabled: false
+    description: Joint full fine-tune LR sweep, DINOv2-{model_size} (encoder default is 0.1 x head LR).
+    grid:
+      model_size: [s]
+      learning_rate: [1.0e-6, 1.0e-5]
+      encoder_lr: [1.0e-7, 1.0e-6]
+    train:
+      penn_split_csv: joint_penn_datasplit_oldF0.csv
+
+  # ======================================================================
+  # Phase 5 — loss, on the winning strategy with its phase 3-4 settings
+  # (copy them into the train blocks). Balanced CE is the baseline and needs
+  # no rerun. If phase 2 was close, also run the best loss on the other strategy.
+  # ======================================================================
+  - id: P5_staged_{model_size}_ceNoWeight
+    phase: 5
+    enabled: false
+    description: Stage 2, unweighted CE.
+    grid: {model_size: [s]}
+    init_from: {experiment: "P3_stage1_oldpenn_{model_size}", fold: 0}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+      class_weight: none
+
+  - id: P5_staged_{model_size}_focal_g{focal_gamma}_a{focal_alpha}
+    phase: 5
+    enabled: false
+    description: Stage 2, focal loss (gamma {focal_gamma}, alpha {focal_alpha}).
+    grid: {model_size: [s], focal_gamma: [2.0], focal_alpha: [balanced]}
+    init_from: {experiment: "P3_stage1_oldpenn_{model_size}", fold: 0}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+      loss: focal
+
+  - id: P5_joint_{model_size}_ceNoWeight
+    phase: 5
+    enabled: false
+    description: Joint, unweighted CE.
+    grid: {model_size: [s]}
+    train:
+      penn_split_csv: joint_penn_datasplit_oldF0.csv
+      class_weight: none
+
+  - id: P5_joint_{model_size}_focal_g{focal_gamma}_a{focal_alpha}
+    phase: 5
+    enabled: false
+    description: Joint, focal loss (gamma {focal_gamma}, alpha {focal_alpha}).
+    grid: {model_size: [s], focal_gamma: [2.0], focal_alpha: [balanced]}
+    train:
+      penn_split_csv: joint_penn_datasplit_oldF0.csv
+      loss: focal
+
+  # ======================================================================
+  # Phase 6 — input depth. Each depth needs its own preprocessed folder;
+  # the experiment stays blocked until that folder exists.
+  # step2b now zero-pads short volumes (folders end in _pad0). Source depth is
+  # 120 slices for ~70% of exams, so n48/n64 at s3_o0 (144/192 slices) would be
+  # mostly zero slabs: revisit slab_size/overlap before enabling.
+  # ======================================================================
+  - id: P6_joint_{model_size}_slabs{slices}
+    phase: 6
+    enabled: false
+    description: Joint, {slices} MIP slabs (3 slices each).
+    grid:
+      model_size: [s]
+      slices: [32, 48, 64]
+    train:
+      penn_split_csv: joint_penn_datasplit_oldF0.csv
+      path_root_data: final_cropped_and_masked_slabs_n{slices}_s3_o0_pad0
+
+  - id: P6_joint_{model_size}_raw96
+    phase: 6
+    enabled: false
+    description: Joint, 96 raw slices (same z-coverage as 32 slabs x 3) instead of MIP slabs.
+    grid: {model_size: [s]}
+    train:
+      penn_split_csv: joint_penn_datasplit_oldF0.csv
+      path_root_data: final_cropped_and_masked_data_d96
+      slices: 96
+
+  # ======================================================================
+  # Phase 7 — seed repeats for the 2–3 finalists (fold std is ~0.01–0.03,
+  # so smaller gaps between configs are not trustworthy from one seed).
+  # Copy a finalist's train block here and list seeds.
+  # ======================================================================
+  - id: P7_final_seed{seed}
+    phase: 7
+    enabled: false
+    description: Finalist config repeated with seed {seed}.
+    grid: {seed: [7, 42, 123]}
+    train:
+      penn_split_csv: joint_penn_datasplit_oldF0.csv

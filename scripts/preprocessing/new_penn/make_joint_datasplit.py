@@ -8,8 +8,9 @@ as extra ``Split=train`` (that fold's old test stays out). Pass
 Patient leak guard: an old exam whose group id (``MRN``, or mapping-joined
 ``MRN``, else ``PennChart_EpicPatientId``) appears in that fold's new-Penn
 test or val is dropped from the graft. Empty / missing ids are not treated
-as a shared patient. IDs are compared after stripping a pandas float suffix
-(``1144138.0`` == ``1144138``). Until old Penn has real MRNs this is a no-op.
+as a shared patient. IDs are compared via ``normalize_patient_id``
+(``001144138`` == ``1144138.0`` == ``1144138``). With the default old split
+(already filtered by ``step3b_exclude_new_penn_patients.py``) it should drop 0.
 
 Writes a ``cohort`` column (``new_penn`` | ``old_penn``) and a unified ``MRN``.
 """
@@ -17,33 +18,21 @@ Writes a ``cohort`` column (``new_penn`` | ``old_penn``) and a unified ``MRN``.
 from __future__ import annotations
 
 import argparse
-import re
+import sys
 from pathlib import Path
 
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from mst.data.patient_ids import normalize_patient_id as _norm_id  # noqa: E402
+
 OUT_ROOT = Path(r"D:\Users\arthur\Data\MST_birads4")
 NEW_SPLIT_CSV = OUT_ROOT / "new_penn_datasplit_v5_noBenHR.csv"
-OLD_SPLIT_CSV = OUT_ROOT / "old_penn_datasplit_v2.csv"
-OLD_MAPPING_CSV = OUT_ROOT / "old_penn_mapping_v2.csv"
+OLD_SPLIT_CSV = OUT_ROOT / "old_penn_datasplit_noNewPenn.csv"
+OLD_MAPPING_CSV = OUT_ROOT / "old_penn_mapping.csv"
 OUTPUT_CSV = OUT_ROOT / "joint_penn_datasplit_v5.csv"
 
 REQUIRED_SPLIT_COLS = ("UID", "Fold", "Split", "Malignant")
-_BLANK_IDS = frozenset({"", "nan", "none", "null", "<na>"})
-# pandas often writes integer MRNs as "123.0"; keep the integer digits.
-_FLOAT_INT_ID = re.compile(r"^([+-]?)(\d+)\.0+$")
-
-
-def _norm_id(val) -> str:
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return ""
-    text = str(val).strip()
-    if text.lower() in _BLANK_IDS:
-        return ""
-    match = _FLOAT_INT_ID.fullmatch(text)
-    if match:
-        return match.group(1) + match.group(2)
-    return text
 
 
 def _require_cols(df: pd.DataFrame, cols: tuple[str, ...], path: Path) -> None:
@@ -208,7 +197,7 @@ def make_joint_datasplit(
     for fold, n in leak_by_fold.items():
         print(f"  fold {fold}: {n}")
     if sum(leak_by_fold.values()) == 0:
-        print("  (no-op until old Penn has MRNs that match new-Penn patients)")
+        print("  (none: old split shares no patients with new-Penn val/test)")
 
     print("\nPer-fold counts (unique UID):")
     for fold in new_folds:

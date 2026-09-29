@@ -1,4 +1,5 @@
 import inspect
+import os
 from pathlib import Path
 import pandas as pd 
 import torch.utils.data as data 
@@ -115,6 +116,7 @@ class PENN_Dataset3D(data.Dataset):
     LABEL = 'Malignant'
     AUX_PATH = Path(r'D:\Users\arthur\Data\MST_birads4')
     SPLIT_CSV_NAME = 'new_penn_datasplit.csv'
+    H5_IMAGE = 'sub'  # same image as the nii.gz branch reads
 
     @classmethod
     def default_split_csv_path(cls):
@@ -208,13 +210,44 @@ class PENN_Dataset3D(data.Dataset):
 
         self.df = df.copy()
 
-        # Filter out missing files and degenerate (constant-intensity) volumes.
-        # The latter happens when step2b's image x mask leaves a side empty,
-        # which would crash ZNormalization at training time.
-        self.df['img_path'] = self.df['UID'].apply(lambda uid: self.path_root_data / uid / 'sub.nii.gz')
-        self.df = self.df[self.df['img_path'].apply(self._is_usable)].reset_index(drop=True)
+        # A ``.h5`` path_root_data is a step2c pack of a step2b folder. The
+        # handle is opened lazily per process: h5py files don't survive
+        # DataLoader worker spawn.
+        self.h5_path = self.path_root_data if self.path_root_data.suffix == '.h5' else None
+        self._h5 = None
+        self._h5_pid = None
+        if self.h5_path is not None:
+            import h5py
+            with h5py.File(self.h5_path, 'r') as f:
+                if self.H5_IMAGE not in f:
+                    raise KeyError(f"{self.h5_path} has no {self.H5_IMAGE!r} dataset; repack with --images {self.H5_IMAGE}.")
+                h5_index = {uid: i for i, uid in enumerate(f['uid'].asstr()[()])}
+            # step2c already dropped missing and constant volumes.
+            self.df['h5_row'] = self.df['UID'].map(h5_index)
+            self.df = self.df[self.df['h5_row'].notna()].reset_index(drop=True)
+            self.df['h5_row'] = self.df['h5_row'].astype(int)
+        else:
+            # Filter out missing files and degenerate (constant-intensity) volumes.
+            # The latter happens when step2b's image x mask leaves a side empty,
+            # which would crash ZNormalization at training time.
+            self.df['img_path'] = self.df['UID'].apply(lambda uid: self.path_root_data / uid / 'sub.nii.gz')
+            self.df = self.df[self.df['img_path'].apply(self._is_usable)].reset_index(drop=True)
 
         self.item_pointers = self.df.index.tolist()
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['_h5'] = None
+        state['_h5_pid'] = None
+        return state
+
+    def _h5_image(self, row: int) -> tio.ScalarImage:
+        if self._h5 is None or self._h5_pid != os.getpid():
+            import h5py
+            self._h5 = h5py.File(self.h5_path, 'r')
+            self._h5_pid = os.getpid()
+        tensor = torch.from_numpy(self._h5[self.H5_IMAGE][row]).unsqueeze(0)
+        return tio.ScalarImage(tensor=tensor, affine=self._h5['affine'][row])
 
     @staticmethod
     def slab_tissue_fractions(img_tensor: torch.Tensor) -> torch.Tensor:
@@ -277,18 +310,19 @@ class PENN_Dataset3D(data.Dataset):
         target = item[self.LABEL]
         uid = item['UID']
 
-        # Construct the path to the patient's data folder
-        folder_path = self.path_root_data / uid
-        img_path = folder_path/'sub.nii.gz'
-
-        if not img_path.exists():
-            # Fall through to the next sample so the loader doesn't crash on
-            # a partially-preprocessed dataset.
-            print(f"[PENN_Dataset3D] missing file for UID {uid}; skipping.", flush=True)
-            return self.__getitem__((index + 1) % len(self.item_pointers))
+        if self.h5_path is not None:
+            image = self._h5_image(int(item['h5_row']))
+        else:
+            img_path = self.path_root_data / uid / 'sub.nii.gz'
+            if not img_path.exists():
+                # Fall through to the next sample so the loader doesn't crash on
+                # a partially-preprocessed dataset.
+                print(f"[PENN_Dataset3D] missing file for UID {uid}; skipping.", flush=True)
+                return self.__getitem__((index + 1) % len(self.item_pointers))
+            image = tio.ScalarImage(img_path)
 
         try:
-            subject = tio.Subject(image=tio.ScalarImage(img_path))
+            subject = tio.Subject(image=image)
             transformed_subject = self.transform(subject)
         except RuntimeError as e:
             # Most common cause: ZNormalization complains "Standard deviation
