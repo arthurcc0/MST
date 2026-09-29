@@ -12,8 +12,10 @@
 #SBATCH --partition=b200-mig90
 #SBATCH --gpus=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+# Betty CLI filter (Aug 2026): b200-mig90 is 14 CPUs/GPU and 8 GB/CPU (112 GB/GPU).
+# https://docs.parcc.upenn.edu/docs/notes/filter.html
+#SBATCH --cpus-per-task=14
+#SBATCH --mem=112G
 #SBATCH --time=24:00:00
 #SBATCH --output=experiments/logs/slurm/%x_%j.out
 #SBATCH --error=experiments/logs/slurm/%x_%j.err
