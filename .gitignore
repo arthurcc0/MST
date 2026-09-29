@@ -13,6 +13,7 @@
 !*.md
 !*.bat
 !*.sh
+!*.sbatch
 !*.py
 !*.yml
 !*.ui

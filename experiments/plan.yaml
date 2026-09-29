@@ -31,8 +31,9 @@ machines:
   #   predict_output_dir: E:\MST_results
   cluster:                      # SLURM: pass --machine cluster (Betty node hostnames change)
     python: null                # interpreter that launches run_plan.py (the job's venv)
-    # Betty storage: code in $HOME (/vast/home/<user>/, 50 GB). Data and run
-    # folders on VAST project space, not $HOME and not Ceph (Ceph is for idle files).
+    # Betty storage: clone at /vast/projects/bbruno/breast-imaging/arthur/MST.
+    # Conda env `mst` is in $HOME. Data and run folders on project VAST, not
+    # $HOME (50 GB) and not Ceph (Ceph is for idle files).
     data_root: /vast/projects/bbruno/breast-imaging/arthur/MST_data
     runs_root: /vast/projects/bbruno/breast-imaging/arthur/MST_runs
     predict_output_dir: /vast/projects/bbruno/breast-imaging/arthur/MST_results
