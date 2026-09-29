@@ -29,12 +29,13 @@ machines:
   #   data_root: E:\MST_birads4
   #   runs_root: E:\MST_runs
   #   predict_output_dir: E:\MST_results
-  cluster:                      # SLURM: pass --machine cluster (hostnames change per node)
-    python: null                # interpreter that launches run_plan.py
-    # Edit these three paths for the cluster. data_root holds the .h5 and the split CSVs.
-    data_root: /scratch/arthur/MST_birads4
-    runs_root: /scratch/arthur/MST_runs
-    predict_output_dir: /scratch/arthur/MST_results
+  cluster:                      # SLURM: pass --machine cluster (Betty node hostnames change)
+    python: null                # interpreter that launches run_plan.py (the job's venv)
+    # Betty storage: code in $HOME (/vast/home/<user>/, 50 GB). Data and run
+    # folders on VAST project space, not $HOME and not Ceph (Ceph is for idle files).
+    data_root: /vast/projects/bbruno/breast-imaging/arthur/MST_data
+    runs_root: /vast/projects/bbruno/breast-imaging/arthur/MST_runs
+    predict_output_dir: /vast/projects/bbruno/breast-imaging/arthur/MST_results
     train_overrides:            # this machine only; run names / summary keep plan values
       path_root_data: "{path_root_data}.h5"
       num_workers: 8
@@ -193,8 +194,12 @@ experiments:
       penn_split_csv: joint_penn_datasplit_oldF{old_fold}.csv
 
   # ======================================================================
-  # Phase 3 — backbone size. Enable ONE strategy (whichever wins phase 2).
-  # Add g only if s -> b -> l keeps improving val AUC.
+  # Phase 3 — backbone size and DINOv2 vs DINOv3. Staged recipe (phase 2 winner).
+  # DINOv2-S stage 1 is NOT in this grid: it is P2_stage1_oldpenn_s fold 0.
+  # If that run folder is missing on the cluster, P3_staged_s is blocked (it
+  # will not silently retrain ViT-S). Copy it, or skip size s on Betty.
+  # DINOv3 weights: facebook/dinov3-vit{s,b,l}16-pretrain-lvd1689m (Hugging Face).
+  # Add g only if s -> b -> l keeps improving val AUC (v2 only; v3 has s/b/l).
   # ======================================================================
   - id: P3_joint_{model_size}
     phase: 3
@@ -206,23 +211,59 @@ experiments:
 
   - id: P3_stage1_oldpenn_{model_size}
     phase: 3
-    enabled: false
-    description: Stage 1, DINOv2-{model_size}, old fold 0 (s reuses the phase 2 base).
+    enabled: true
+    description: Stage 1, DINOv2-{model_size}, old fold 0 (new sizes only).
     cohort: P2_stage1_oldpenn_{model_size}
-    grid: {model_size: [s, b, l]}
+    grid: {model_size: [b, l]}
     folds: [0]
     eval: false
     train:
       penn_split_csv: old_penn_datasplit_noNewPenn.csv
       high_risk_policy: exclude
 
+  - id: P3_staged_s
+    phase: 3
+    enabled: true
+    description: Stage 2, DINOv2-s (from the phase 2 ViT-S stage-1 ckpt).
+    init_from: {experiment: P2_stage1_oldpenn_s, fold: 0}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+
   - id: P3_staged_{model_size}
     phase: 3
-    enabled: false
+    enabled: true
     description: Stage 2, DINOv2-{model_size}.
-    grid: {model_size: [s, b, l]}
+    grid: {model_size: [b, l]}
     init_from: {experiment: "P3_stage1_oldpenn_{model_size}", fold: 0}
     train:
+      penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+
+  - id: P3_stage1_oldpenn_v3_{model_size}
+    phase: 3
+    enabled: true
+    description: Stage 1, DINOv3-{model_size}, old fold 0.
+    grid: {model_size: [s, b, l]}
+    folds: [0]
+    eval: false
+    train:
+      model_name: DinoClassifierSliceV3
+      penn_split_csv: old_penn_datasplit_noNewPenn.csv
+      high_risk_policy: exclude
+
+  - id: P3_staged_v3_{model_size}
+    phase: 3
+    enabled: true
+    description: Stage 2, DINOv3-{model_size}.
+    grid: {model_size: [s, b, l]}
+    init_from: {experiment: "P3_stage1_oldpenn_v3_{model_size}", fold: 0}
+    train:
+      model_name: DinoClassifierSliceV3
       penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
       unfreeze_encoder_blocks: 2
       learning_rate: 1.0e-5

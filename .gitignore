@@ -12,6 +12,7 @@
 !*.gitignore
 !*.md
 !*.bat
+!*.sh
 !*.py
 !*.yml
 !*.ui
