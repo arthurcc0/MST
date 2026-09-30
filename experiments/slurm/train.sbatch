@@ -33,6 +33,8 @@ FOLD="${FOLD:?set FOLD, e.g. 0}"
 cd "$MST_ROOT"
 mkdir -p experiments/logs/slurm
 
+module load cuda/12.8.1
+
 if [[ -f "$MST_ROOT/.venv/bin/activate" ]]; then
   source "$MST_ROOT/.venv/bin/activate"
 else
