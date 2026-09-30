@@ -1,19 +1,18 @@
 #!/bin/bash
-# One experiment / one fold on PARCC Betty.
+# One experiment / one fold on PARCC Betty using a full B200.
 #
 # Example:
-#   sbatch --export=EXP=P3_stage1_oldpenn_b,FOLD=0 experiments/slurm/train45.sbatch
-#   sbatch --export=EXP=P3_staged_s,FOLD=0 experiments/slurm/train45.sbatch
+#   sbatch --export=EXP=P3_stage1_oldpenn_b,FOLD=0 experiments/slurm/train180.sbatch
+#   sbatch --export=EXP=P3_staged_s,FOLD=0 experiments/slurm/train180.sbatch
 #
-# ViT-S fits on b200-mig45 (45 GB).
-# ViT-B/L should use b200-mig90.
+# using dgx-b200.
 #
 #SBATCH --job-name=mst
-#SBATCH --partition=b200-mig45
+#SBATCH --partition=dgx-b200
 #SBATCH --gpus=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=6
-#SBATCH --mem=48G
+#SBATCH --cpus-per-task=28
+#SBATCH --mem=224G
 #SBATCH --time=24:00:00
 #SBATCH --output=experiments/logs/slurm/%x_%j.out
 #SBATCH --error=experiments/logs/slurm/%x_%j.err
