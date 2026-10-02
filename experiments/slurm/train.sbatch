@@ -35,12 +35,13 @@ mkdir -p experiments/logs/slurm
 
 module load cuda/12.8.1
 
-if [[ -f "$MST_ROOT/.venv/bin/activate" ]]; then
-  source "$MST_ROOT/.venv/bin/activate"
-else
-  source "$(conda info --base)/etc/profile.d/conda.sh"
-  conda activate "$CONDA_ENV"
-fi
+# Code to activate environment is in the .bashrc file.
+# if [[ -f "$MST_ROOT/.venv/bin/activate" ]]; then
+#   source "$MST_ROOT/.venv/bin/activate"
+# else
+#   source "$(conda info --base)/etc/profile.d/conda.sh"
+#   conda activate "$CONDA_ENV"
+# fi
 
 # If the .h5 still lives on Ceph, copy it to the node's NVMe for this job and
 # point machines.cluster.data_root at that folder (or export MST_DATA_ROOT if
