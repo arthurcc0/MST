@@ -30,15 +30,14 @@ mkdir -p experiments/logs/slurm
 # Load the CUDA toolkit used to build/run the cluster environment.
 module load cuda/12.8.1
 
-# Activate the project environment.
-if [[ -f "$MST_ROOT/.venv/bin/activate" ]]; then
-    source "$MST_ROOT/.venv/bin/activate"
-else
-    source "$(conda info --base)/etc/profile.d/conda.sh"
-    conda activate "$CONDA_ENV"
-fi
+# Activate the Conda environment.
+CONDA_BASE="/vast/parcc/spack/sw/apps/linux-sapphirerapids/anaconda3-2023.09-0-ieilyrkph5mewqcum3ajc4odlt2vakri"
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "$CONDA_ENV"
 
 echo "host=$(hostname)"
+echo "python=$(which python)"
+echo "python_version=$(python --version)"
 echo "cuda=$(python -c 'import torch; print(torch.cuda.is_available(), torch.version.cuda, torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)')"
 echo "exp=$EXP fold=$FOLD"
 

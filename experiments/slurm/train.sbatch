@@ -33,21 +33,18 @@ FOLD="${FOLD:?set FOLD, e.g. 0}"
 cd "$MST_ROOT"
 mkdir -p experiments/logs/slurm
 
-# Activate the conda environment.
-if [[ -f "$MST_ROOT/.venv/bin/activate" ]]; then
-  source "$MST_ROOT/.venv/bin/activate"
-else
-  source "$(conda info --base)/etc/profile.d/conda.sh"
-  conda activate "$CONDA_ENV"
-fi
+# Load CUDA.
+module load cuda/12.8.1
 
-# If the .h5 still lives on Ceph, copy it to the node's NVMe for this job and
-# point machines.cluster.data_root at that folder (or export MST_DATA_ROOT if
-# you switch the plan to ${MST_DATA_ROOT}).
-# mkdir -p "/tmp/$USER/MST_birads4"
-# cp -n "$CEPH_DATA"/*.h5 "$CEPH_DATA"/*.csv "/tmp/$USER/MST_birads4/"
+# Activate the Conda environment.
+CONDA_BASE="/vast/parcc/spack/sw/apps/linux-sapphirerapids/anaconda3-2023.09-0-ieilyrkph5mewqcum3ajc4odlt2vakri"
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "$CONDA_ENV"
 
-echo "host=$(hostname)  cuda=$(python -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)')"
+echo "host=$(hostname)"
+echo "python=$(which python)"
+echo "python_version=$(python --version)"
+echo "cuda=$(python -c 'import torch; print(torch.cuda.is_available(), torch.version.cuda, torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)')"
 echo "exp=$EXP fold=$FOLD"
 
 python scripts/experiments/run_plan.py run \
