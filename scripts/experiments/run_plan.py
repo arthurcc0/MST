@@ -10,11 +10,12 @@ different machine once ``runs/`` and the predict results are copied over.
     python scripts/experiments/run_plan.py status   [--phase 1]
     python scripts/experiments/run_plan.py run      --phase 1 [--exp ID ...] [--folds 0 1] [--dry-run]
     python scripts/experiments/run_plan.py summarize
+    python scripts/experiments/run_plan.py times       # rebuild training_times.csv from runs + ledger
     python scripts/experiments/run_plan.py orphans      # run folders the plan does not use
 
 Outputs (next to the plan): ``summary.csv`` / ``summary.xlsx`` (one row per
 experiment, fold and mean AUCs), ``ledger.csv`` (append-only log of every
-launched command), ``logs/<exp>/`` (stdout of each train/predict call).
+launched command), ``results/training_times.csv``, ``logs/<exp>/``.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -412,6 +413,153 @@ def _append_ledger(path: Path, row: dict) -> None:
         writer.writerow(row)
 
 
+TIMES_FIELDS = [
+    "experiment", "fold", "model", "gpu", "epochs", "best_epoch",
+    "start_time", "end_time", "training_seconds", "training_minutes", "source",
+]
+
+
+def _epoch_from_ckpt_name(name: str) -> int | None:
+    m = re.search(r"epoch[=-](\d+)", name)
+    return int(m.group(1)) if m else None
+
+
+def _epochs_from_run(run: Path) -> tuple[int | None, int | None, str]:
+    """Return (epochs_ran, best_epoch, gpu) from a finished run folder."""
+    stats_path = run / "training_stats.json"
+    if stats_path.is_file():
+        d = json.loads(stats_path.read_text(encoding="utf-8"))
+        return d.get("epochs_ran"), d.get("best_epoch"), d.get("gpu") or ""
+    best_epoch = None
+    ckpt_json = run / "best_checkpoint.json"
+    if ckpt_json.is_file():
+        name = json.loads(ckpt_json.read_text(encoding="utf-8")).get("best_model_epoch", "")
+        best_epoch = _epoch_from_ckpt_name(str(name))
+    last_epoch = None
+    last = run / "last.ckpt"
+    if last.is_file():
+        try:
+            import torch
+            ckpt = torch.load(last, map_location="cpu", weights_only=False)
+            if isinstance(ckpt, dict) and ckpt.get("epoch") is not None:
+                last_epoch = int(ckpt["epoch"])
+        except Exception:
+            last_epoch = None
+    epochs_ran = (last_epoch + 1) if last_epoch is not None else None
+    return epochs_ran, best_epoch, ""
+
+
+def _span_from_run_files(run: Path) -> tuple[datetime | None, datetime | None, float | None]:
+    """Wall clock from config.yaml (written at train start) to best_checkpoint.json."""
+    end_p = run / "best_checkpoint.json"
+    start_p = run / "config.yaml"
+    if not end_p.is_file():
+        return None, None, None
+    if not start_p.is_file():
+        start_p = min((p for p in run.iterdir() if p.is_file()), key=lambda p: p.stat().st_mtime, default=end_p)
+    start = datetime.fromtimestamp(start_p.stat().st_mtime)
+    end = datetime.fromtimestamp(end_p.stat().st_mtime)
+    seconds = (end - start).total_seconds()
+    if seconds < 0:
+        return start, end, None
+    return start, end, seconds
+
+
+def _ledger_train_times(plan_dir: Path) -> dict[tuple[str, int], dict]:
+    path = plan_dir / "ledger.csv"
+    out: dict[tuple[str, int], dict] = {}
+    if not path.is_file():
+        return out
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            if row.get("step") != "train" or str(row.get("returncode", "0")) not in {"0", "0.0"}:
+                continue
+            try:
+                key = (row["experiment"], int(row["fold"]))
+            except (KeyError, ValueError):
+                continue
+            out[key] = row
+    return out
+
+
+def _write_times_csv(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=TIMES_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in TIMES_FIELDS})
+
+
+def _append_training_times(plan_dir: Path, exp: Experiment, fold: int, run: Path | None,
+                           start: datetime, seconds: float, gpu: str) -> None:
+    epochs, best_epoch, stats_gpu = (None, None, "")
+    if run is not None:
+        epochs, best_epoch, stats_gpu = _epochs_from_run(run)
+    path = plan_dir / "results" / "training_times.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new = not path.is_file()
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=TIMES_FIELDS)
+        if new:
+            writer.writeheader()
+        writer.writerow({
+            "experiment": exp.id,
+            "fold": fold,
+            "model": exp.train.get("model_name", ""),
+            "gpu": stats_gpu or gpu,
+            "epochs": epochs if epochs is not None else "",
+            "best_epoch": best_epoch if best_epoch is not None else "",
+            "start_time": start.isoformat(timespec="seconds"),
+            "end_time": datetime.now().isoformat(timespec="seconds"),
+            "training_seconds": round(seconds, 2),
+            "training_minutes": round(seconds / 60, 2),
+            "source": "runner",
+        })
+
+
+def cmd_times(machine: Machine, exps: list[Experiment], plan_dir: Path) -> None:
+    """Rebuild training_times.csv from finished run folders and ledger.csv."""
+    ledger = _ledger_train_times(plan_dir)
+    rows = []
+    for exp in exps:
+        for fold in exp.folds:
+            run, done = find_run(machine, exp, fold)
+            if not done or run is None:
+                continue
+            epochs, best_epoch, gpu = _epochs_from_run(run)
+            start, end, file_seconds = _span_from_run_files(run)
+            led = ledger.get((exp.id, fold))
+            source = "files"
+            seconds = file_seconds
+            if led and led.get("minutes") not in (None, ""):
+                try:
+                    seconds = float(led["minutes"]) * 60
+                    source = "ledger"
+                    stamp = led.get("timestamp") or ""
+                    if stamp:
+                        start = datetime.strptime(stamp, "%Y%m%d_%H%M%S")
+                        end = start + timedelta(seconds=seconds)
+                except (TypeError, ValueError):
+                    pass
+            rows.append({
+                "experiment": exp.id,
+                "fold": fold,
+                "model": exp.train.get("model_name", ""),
+                "gpu": gpu,
+                "epochs": epochs if epochs is not None else "",
+                "best_epoch": best_epoch if best_epoch is not None else "",
+                "start_time": start.isoformat(timespec="seconds") if start else "",
+                "end_time": end.isoformat(timespec="seconds") if end else "",
+                "training_seconds": round(seconds, 2) if seconds is not None else "",
+                "training_minutes": round(seconds / 60, 2) if seconds is not None else "",
+                "source": source,
+            })
+    out = plan_dir / "results" / "training_times.csv"
+    _write_times_csv(out, rows)
+    print(f"Wrote {len(rows)} rows to {out}")
+
+
 def execute(step: str, cmd: list[str], exp: Experiment, fold: int, machine: Machine,
             plan_dir: Path, dry_run: bool) -> bool:
     print(f"\n[{exp.id} f{fold}] {step}:\n  {subprocess.list2cmdline(cmd)}", flush=True)
@@ -419,8 +567,10 @@ def execute(step: str, cmd: list[str], exp: Experiment, fold: int, machine: Mach
         return True
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = plan_dir / "logs" / exp.id / f"f{fold}_{step}_{stamp}.log"
-    t0 = time.time()
+    start = datetime.now()
+    t0 = time.perf_counter()
     code = _run_logged(cmd, log_path)
+    elapsed = time.perf_counter() - t0
     _append_ledger(plan_dir / "ledger.csv", {
         "timestamp": stamp,
         "machine": machine.name,
@@ -431,10 +581,20 @@ def execute(step: str, cmd: list[str], exp: Experiment, fold: int, machine: Mach
         "fold": fold,
         "step": step,
         "returncode": code,
-        "minutes": round((time.time() - t0) / 60, 1),
+        "minutes": round(elapsed / 60, 1),
         "log": str(log_path.relative_to(plan_dir)),
         "command": subprocess.list2cmdline(cmd),
     })
+    if step == "train":
+        run, _ = find_run(machine, exp, fold)
+        gpu = ""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu = torch.cuda.get_device_name(0)
+        except Exception:
+            gpu = os.environ.get("SLURM_JOB_PARTITION", "")
+        _append_training_times(plan_dir, exp, fold, run, start, elapsed, gpu)
     if code != 0:
         print(f"[{exp.id} f{fold}] {step} FAILED (exit {code}); log: {log_path}", flush=True)
     return code == 0
@@ -667,7 +827,7 @@ def cmd_run(args, machine: Machine, exps: list[Experiment], plan_dir: Path) -> N
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["list", "status", "run", "summarize", "orphans"])
+    parser.add_argument("command", choices=["list", "status", "run", "summarize", "times", "orphans"])
     parser.add_argument("--plan", type=Path, default=DEFAULT_PLAN)
     parser.add_argument("--machine", default=None, help="Key under machines: in the plan (default: hostname, else 'default').")
     parser.add_argument("--phase", type=int, nargs="+", default=None)
@@ -703,6 +863,8 @@ def main() -> None:
             df = df[df["experiment"].isin(ids)]
         print_status(df)
         print(f"\nWrote {plan_dir / 'summary.csv'}")
+    elif args.command == "times":
+        cmd_times(machine, select(exps, args.phase, args.exp), plan_dir)
     elif args.command == "orphans":
         cmd_orphans(machine, exps, plan_dir)
     else:

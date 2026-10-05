@@ -13,6 +13,8 @@ if project_root not in sys.path:
 # if dinov3_path not in sys.path:
 #     sys.path.insert(0, dinov3_path)
 import argparse
+import json
+import re
 from pathlib import Path
 from datetime import datetime
 import yaml
@@ -625,6 +627,18 @@ if __name__ == "__main__":
     # ---------------- Execute Training ----------------
     # Pass ckpt_path=None because we have already loaded the weights
     trainer.fit(model, datamodule=dm, ckpt_path=None)
+
+    best_path = checkpointing.best_model_path or ""
+    best_epoch_m = re.search(r"epoch[=-](\d+)", Path(best_path).name)
+    stats = {
+        "epochs_ran": int(trainer.current_epoch) + 1,
+        "last_epoch": int(trainer.current_epoch),
+        "best_epoch": int(best_epoch_m.group(1)) if best_epoch_m else None,
+        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "",
+    }
+    (path_run_dir / "training_stats.json").write_text(
+        json.dumps(stats, indent=2), encoding="utf-8",
+    )
 
     # ------------- Save path to best model -------------
     model.save_best_checkpoint(path_run_dir, checkpointing.best_model_path)
