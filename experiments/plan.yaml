@@ -271,44 +271,77 @@ experiments:
       encoder_lr: 1.0e-6
 
   # ======================================================================
-  # Phase 4 — fine-tuning depth and learning rates, per chosen size.
+  # Phase 4 — input (slab count / raw vs MIP). Lock this before loss or LR.
+  # n32 MIP slabs is the phase 2–3 baseline (P3_staged_s); do not retrain it.
+  # Each other depth needs its own preprocessed folder (and .h5 on the cluster);
+  # the experiment stays blocked until that folder exists.
+  # step2b zero-pads short volumes (folders end in _pad0). Source depth is
+  # 120 slices for ~70% of exams, so n48/n64 at s3_o0 (144/192 slices) would be
+  # mostly zero slabs: revisit slab_size/overlap before enabling.
   # Screen on 2 folds first:  run --phase 4 --folds 0 1
   # ======================================================================
-  - id: P4_staged_{model_size}_unfrz{unfreeze_encoder_blocks}_lr{learning_rate}_enc{encoder_lr}
+  - id: P4_staged_{model_size}_slabs{slices}
     phase: 4
     enabled: false
-    description: Stage 2 sweep, DINOv2-{model_size}.
+    description: Stage 2, {slices} MIP slabs (3 slices each), DINOv2-{model_size}.
     grid:
       model_size: [s]
-      unfreeze_encoder_blocks: [0, 1, 2, 4]
-      learning_rate: [1.0e-5, 1.0e-4]
-      encoder_lr: [1.0e-6, 1.0e-5]
-    init_from: {experiment: "P3_stage1_oldpenn_{model_size}", fold: 0}
+      slices: [48, 64]
+    init_from: {experiment: P2_stage1_oldpenn_s, fold: 0}
     train:
       penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+      path_root_data: final_cropped_and_masked_slabs_n{slices}_s3_o0_pad0
 
-  - id: P4_joint_{model_size}_lr{learning_rate}_enc{encoder_lr}
+  - id: P4_staged_{model_size}_raw96
     phase: 4
     enabled: false
-    description: Joint full fine-tune LR sweep, DINOv2-{model_size} (encoder default is 0.1 x head LR).
+    description: Stage 2, 96 raw slices (same z-coverage as 32 slabs x 3).
+    grid: {model_size: [s]}
+    init_from: {experiment: P2_stage1_oldpenn_s, fold: 0}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+      path_root_data: final_cropped_and_masked_data_d96
+      slices: 96
+
+  - id: P4_joint_{model_size}_slabs{slices}
+    phase: 4
+    enabled: false
+    description: Joint, {slices} MIP slabs (3 slices each).
     grid:
       model_size: [s]
-      learning_rate: [1.0e-6, 1.0e-5]
-      encoder_lr: [1.0e-7, 1.0e-6]
+      slices: [48, 64]
     train:
       penn_split_csv: joint_penn_datasplit_oldF0.csv
+      path_root_data: final_cropped_and_masked_slabs_n{slices}_s3_o0_pad0
+
+  - id: P4_joint_{model_size}_raw96
+    phase: 4
+    enabled: false
+    description: Joint, 96 raw slices (same z-coverage as 32 slabs x 3) instead of MIP slabs.
+    grid: {model_size: [s]}
+    train:
+      penn_split_csv: joint_penn_datasplit_oldF0.csv
+      path_root_data: final_cropped_and_masked_data_d96
+      slices: 96
 
   # ======================================================================
-  # Phase 5 — loss, on the winning strategy with its phase 3-4 settings
-  # (copy them into the train blocks). Balanced CE is the baseline and needs
-  # no rerun. If phase 2 was close, also run the best loss on the other strategy.
+  # Phase 5 — loss, on the winning strategy with phase 3 size and phase 4
+  # input (copy them into the train blocks). Balanced CE is the baseline and
+  # needs no rerun. If phase 2 was close, also run the best loss on the
+  # other strategy.
   # ======================================================================
   - id: P5_staged_{model_size}_ceNoWeight
     phase: 5
     enabled: false
     description: Stage 2, unweighted CE.
     grid: {model_size: [s]}
-    init_from: {experiment: "P3_stage1_oldpenn_{model_size}", fold: 0}
+    init_from: {experiment: P2_stage1_oldpenn_s, fold: 0}
     train:
       penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
       unfreeze_encoder_blocks: 2
@@ -321,7 +354,7 @@ experiments:
     enabled: false
     description: Stage 2, focal loss (gamma {focal_gamma}, alpha {focal_alpha}).
     grid: {model_size: [s], focal_gamma: [2.0], focal_alpha: [balanced]}
-    init_from: {experiment: "P3_stage1_oldpenn_{model_size}", fold: 0}
+    init_from: {experiment: P2_stage1_oldpenn_s, fold: 0}
     train:
       penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
       unfreeze_encoder_blocks: 2
@@ -348,32 +381,33 @@ experiments:
       loss: focal
 
   # ======================================================================
-  # Phase 6 — input depth. Each depth needs its own preprocessed folder;
-  # the experiment stays blocked until that folder exists.
-  # step2b now zero-pads short volumes (folders end in _pad0). Source depth is
-  # 120 slices for ~70% of exams, so n48/n64 at s3_o0 (144/192 slices) would be
-  # mostly zero slabs: revisit slab_size/overlap before enabling.
+  # Phase 6 — fine-tuning depth and learning rates, per chosen size and input.
+  # Screen on 2 folds first:  run --phase 6 --folds 0 1
+  # Stage-1 for ViT-S is P2_stage1_oldpenn_s (there is no P3_stage1_oldpenn_s).
   # ======================================================================
-  - id: P6_joint_{model_size}_slabs{slices}
+  - id: P6_staged_{model_size}_unfrz{unfreeze_encoder_blocks}_lr{learning_rate}_enc{encoder_lr}
     phase: 6
     enabled: false
-    description: Joint, {slices} MIP slabs (3 slices each).
+    description: Stage 2 sweep, DINOv2-{model_size}.
     grid:
       model_size: [s]
-      slices: [32, 48, 64]
+      unfreeze_encoder_blocks: [0, 1, 2, 4]
+      learning_rate: [1.0e-5, 1.0e-4]
+      encoder_lr: [1.0e-6, 1.0e-5]
+    init_from: {experiment: P2_stage1_oldpenn_s, fold: 0}
     train:
-      penn_split_csv: joint_penn_datasplit_oldF0.csv
-      path_root_data: final_cropped_and_masked_slabs_n{slices}_s3_o0_pad0
+      penn_split_csv: new_penn_datasplit_v5_noBenHR.csv
 
-  - id: P6_joint_{model_size}_raw96
+  - id: P6_joint_{model_size}_lr{learning_rate}_enc{encoder_lr}
     phase: 6
     enabled: false
-    description: Joint, 96 raw slices (same z-coverage as 32 slabs x 3) instead of MIP slabs.
-    grid: {model_size: [s]}
+    description: Joint full fine-tune LR sweep, DINOv2-{model_size} (encoder default is 0.1 x head LR).
+    grid:
+      model_size: [s]
+      learning_rate: [1.0e-6, 1.0e-5]
+      encoder_lr: [1.0e-7, 1.0e-6]
     train:
       penn_split_csv: joint_penn_datasplit_oldF0.csv
-      path_root_data: final_cropped_and_masked_data_d96
-      slices: 96
 
   # ======================================================================
   # Phase 7 — seed repeats for the 2–3 finalists (fold std is ~0.01–0.03,
