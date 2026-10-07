@@ -38,7 +38,7 @@ from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_ROOT = Path(r"D:\Users\arthur\Data\MST_birads4")
-SRC_DIR = DATA_ROOT / "final_cropped_and_masked_slabs_n32_s3_o0"
+SRC_DIR = DATA_ROOT / "final_cropped_and_masked_slabs_n40_s3_o0_pad0"
 # Only the subtraction is used by any planned experiment; add "pre", "post" to pack them too.
 IMAGES = ("sub",)
 NUM_WORKERS = 2

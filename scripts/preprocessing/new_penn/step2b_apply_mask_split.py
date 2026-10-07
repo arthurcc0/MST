@@ -9,12 +9,12 @@ the new_penn layout:
     - we reuse ``get_breast_crop_transform`` from
       ``penn-preprocessed/step2b_crop_or_pad.py`` instead of duplicating it.
 
-For each case this writes::
+For each kept exam this writes::
 
-    <OUT_ROOT>/<PatientID>_left/<image_name>
-    <OUT_ROOT>/<PatientID>_right/<image_name>
+    <OUT_ROOT>/<PatientID>_<side>/<image>.nii.gz
 
-for every ``*.nii.gz`` file in the case's folder (typically pre, post, sub).
+only for laterality rows in the keep list (default: current train splits) and
+only for ``--images`` (default ``sub``; training never reads pre/post).
 
 Writes ``crop_coordinates.csv`` under the output root with per-(patient, side)
 voxel ranges in the step1 ``pre.nii.gz`` space (TorchIO ``W, H, D``), so crops
@@ -38,6 +38,8 @@ Two depth-handling modes are supported:
   ``..._n{N}_s{S}_o{O}_pad0`` for ``zero``, so the two never share a folder.
 """
 
+from __future__ import annotations
+
 import argparse
 import functools
 import sys
@@ -45,6 +47,7 @@ from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import torchio as tio
 from scipy.ndimage import rotate
@@ -76,6 +79,15 @@ OUT_ROOT = OUT_ROOT_BASE / "final_cropped_and_masked_data"
 DEFAULT_SLAB_PARAMS = dict(num_slabs=32, slab_size=3, overlap=0, pad_mode="zero")
 SLAB_PAD_MODES = ("zero", "edge")
 
+IMAGE_CHOICES = ("pre", "post", "sub")
+DEFAULT_IMAGES = ("sub",)
+
+# Post-filter exam lists actually used in training (not the raw step1 mapping).
+DEFAULT_KEEP_CSVS = (
+    OUT_ROOT_BASE / "new_penn_datasplit_v5_noBenHR.csv",
+    OUT_ROOT_BASE / "old_penn_datasplit_noNewPenn.csv",
+)
+
 MASK_KEY = "data"  # key inside the mask .npz
 ROTATE_MASK_DEG = 0  # set to 90 if mask orientation differs from the volume
 
@@ -90,6 +102,57 @@ NUM_WORKERS = 2
 
 # Debug: process only the first case
 DEBUG_SINGLE = False
+
+
+def _uid_patient_side(uid: str) -> tuple[str, str] | None:
+    uid = str(uid).strip()
+    for side in ("left", "right"):
+        suffix = f"_{side}"
+        if uid.endswith(suffix) and len(uid) > len(suffix):
+            return uid[: -len(suffix)], side
+    return None
+
+
+def _normalize_lat(value) -> str | None:
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return None
+    s = str(value).strip().lower()
+    if s in {"left", "l", "1"}:
+        return "left"
+    if s in {"right", "r", "2"}:
+        return "right"
+    return None
+
+
+def load_keep_uids(csv_paths: list[Path]) -> set[str]:
+    """UIDs ``<PatientID>_<left|right>`` from split or mapping CSVs."""
+    keep: set[str] = set()
+    for path in csv_paths:
+        path = Path(path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Keep-list CSV not found: {path}")
+        df = pd.read_csv(path, dtype=str, keep_default_na=False)
+        n_before = len(keep)
+        if "UID" in df.columns:
+            for uid in df["UID"]:
+                parsed = _uid_patient_side(uid)
+                if parsed:
+                    keep.add(f"{parsed[0]}_{parsed[1]}")
+        else:
+            pid_col = next((c for c in ("PatientID", "newaccession", "dummy_acc") if c in df.columns), None)
+            lat_col = next((c for c in ("lat", "laterality") if c in df.columns), None)
+            if pid_col is None or lat_col is None:
+                raise KeyError(
+                    f"{path.name} needs a UID column, or PatientID/newaccession plus lat/laterality."
+                )
+            for _, row in df.iterrows():
+                side = _normalize_lat(row[lat_col])
+                pid = str(row[pid_col]).strip()
+                if side and pid:
+                    keep.add(f"{pid}_{side}")
+        print(f"  {path.name}: +{len(keep) - n_before} exams (running total {len(keep)})")
+    return keep
+
 
 def _load_mask_npz(path: Path) -> np.ndarray:
     with np.load(path, allow_pickle=True) as npz:
@@ -223,6 +286,8 @@ def _process_case(
     slab_params: dict = None,
     force: bool = False,
     mask_cc_min_fraction: float = MASK_CC_MIN_FRACTION,
+    keep_uids: frozenset | None = None,
+    images: tuple = DEFAULT_IMAGES,
 ) -> list:
     """Process a single case. Returns a list of per-(image, side) stats records.
 
@@ -237,18 +302,22 @@ def _process_case(
     patient_id = path_dir.name
     stats_out: list = []
     crop_records: list = []
+    sides = ("left", "right")
+    if keep_uids is not None:
+        sides = tuple(s for s in ("left", "right") if f"{patient_id}_{s}" in keep_uids)
+        if not sides:
+            return crop_records, stats_out
 
-    # Skip if outputs already exist (unless force / DEBUG_SINGLE tuning).
-    input_names = [p.name for p in path_dir.glob("*.nii.gz")]
-    if input_names and not force and not DEBUG_SINGLE:
-        out_left = out_root / f"{patient_id}_left"
-        out_right = out_root / f"{patient_id}_right"
-        if out_left.is_dir() and out_right.is_dir():
-            existing_left = {p.name for p in out_left.glob("*.nii.gz")}
-            existing_right = {p.name for p in out_right.glob("*.nii.gz")}
-            needed = set(input_names)
-            if needed.issubset(existing_left) and needed.issubset(existing_right):
-                return crop_records, stats_out
+    needed_names = [f"{name}.nii.gz" for name in images]
+
+    # Skip if requested outputs already exist (unless force / DEBUG_SINGLE).
+    if needed_names and not force and not DEBUG_SINGLE:
+        if all(
+            (out_root / f"{patient_id}_{side}" / name).is_file()
+            for side in sides
+            for name in needed_names
+        ):
+            return crop_records, stats_out
 
     mask_path = mask_dir / f"{patient_id}.npz"
     if not mask_path.is_file():
@@ -293,7 +362,7 @@ def _process_case(
         crop_transforms = {}
         vertical_bounds = {}
         cleaned_side_masks = {}
-        for side in ("left", "right"):
+        for side in sides:
             side_pre = split_transforms[side](pre_img)
             side_mask = split_transforms[side](mask_label)
             side_mask_np = side_mask.data.squeeze().numpy()
@@ -341,8 +410,11 @@ def _process_case(
             inplane_target = (int(target_shape[0]), int(target_shape[1]), int(slab_params["num_slabs"]))
             inplane_pad = tio.CropOrPad(inplane_target, padding_mode=0)
 
-        # ---- Process every image in this case folder (pre, post, sub) ----
-        for path_img in path_dir.glob("*.nii.gz"):
+        # ---- Save only requested image types (default: sub) ----
+        for image_name in images:
+            path_img = path_dir / f"{image_name}.nii.gz"
+            if not path_img.is_file():
+                continue
             img = tio.ScalarImage(path_img)
             if img.shape[1] < 100:
                 del img
@@ -356,7 +428,7 @@ def _process_case(
             )
             del img
 
-            for side in ("left", "right"):
+            for side in sides:
                 side_subject = _side_subject_with_mask(
                     split_transforms[side](subject),
                     cleaned_side_masks[side],
@@ -537,6 +609,8 @@ def main(
     pool_chunksize: int = 1,
     force: bool = False,
     mask_cc_min_fraction: float = MASK_CC_MIN_FRACTION,
+    keep_uids: set[str] | None = None,
+    images: tuple = DEFAULT_IMAGES,
 ) -> None:
     if not IN_DATA_ROOT.is_dir():
         raise FileNotFoundError(f"Input data root not found: {IN_DATA_ROOT}")
@@ -545,7 +619,16 @@ def main(
 
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
+    keep_uids_fs = frozenset(keep_uids) if keep_uids is not None else None
     patient_dirs = [p for p in IN_DATA_ROOT.iterdir() if p.is_dir()]
+    n_on_disk = len(patient_dirs)
+    if keep_uids_fs is not None:
+        keep_patients = {uid.rsplit("_", 1)[0] for uid in keep_uids_fs}
+        patient_dirs = [p for p in patient_dirs if p.name in keep_patients]
+        print(
+            f"Keep list: {len(keep_uids_fs)} exams / {len(keep_patients)} accessions; "
+            f"{len(patient_dirs)}/{n_on_disk} folders on disk match."
+        )
     if DEBUG_SINGLE:
         patient_dirs = [p for p in patient_dirs if p.name == "73032737"] # Specify the case to process
         # patient_dirs = patient_dirs[:1]
@@ -560,6 +643,7 @@ def main(
     print(
         f"Processing {len(patient_dirs)} cases. Output: {out_root}  [{mode_desc}]  "
         f"(workers={n_workers}, chunksize={max(1, int(pool_chunksize))}, "
+        f"images={','.join(images)}, "
         f"mask_cc_min_fraction={mask_cc_min_fraction})"
     )
 
@@ -575,6 +659,8 @@ def main(
         slab_params=slab_params,
         force=force,
         mask_cc_min_fraction=mask_cc_min_fraction,
+        keep_uids=keep_uids_fs,
+        images=tuple(images),
     )
     chunksize = max(1, int(pool_chunksize))
 
@@ -638,6 +724,27 @@ if __name__ == "__main__":
         help='Cases per Pool task batch (default: 4). Reduces scheduling overhead on large runs.',
     )
     parser.add_argument(
+        '--images',
+        nargs='+',
+        choices=IMAGE_CHOICES,
+        default=list(DEFAULT_IMAGES),
+        help="Image types to write (default: sub). Training uses subtraction only.",
+    )
+    parser.add_argument(
+        '--keep_csv',
+        nargs='+',
+        default=None,
+        help=(
+            "CSV(s) of exams to process (UID, or PatientID+lat). Default: "
+            "new_penn_datasplit_v5_noBenHR.csv and old_penn_datasplit_noNewPenn.csv."
+        ),
+    )
+    parser.add_argument(
+        '--all',
+        action='store_true',
+        help='Process every folder in the step2a output (ignore keep_csv).',
+    )
+    parser.add_argument(
         '--force',
         action='store_true',
         help='Reprocess even when output NIfTIs already exist.',
@@ -687,6 +794,14 @@ if __name__ == "__main__":
         else:
             cli_out_root = OUT_ROOT  # unsuffixed default for backward compatibility
 
+    if cli_args.all:
+        keep_uids = None
+        print("Processing all step2a folders (--all).")
+    else:
+        keep_paths = [Path(p) for p in cli_args.keep_csv] if cli_args.keep_csv else list(DEFAULT_KEEP_CSVS)
+        print("Keep-list CSVs:")
+        keep_uids = load_keep_uids(keep_paths)
+
     main(
         target_shape=cli_target_shape,
         out_root=cli_out_root,
@@ -695,4 +810,6 @@ if __name__ == "__main__":
         pool_chunksize=cli_args.pool_chunksize,
         force=bool(cli_args.force),
         mask_cc_min_fraction=float(cli_args.mask_cc_min_fraction),
+        keep_uids=keep_uids,
+        images=tuple(cli_args.images),
     )

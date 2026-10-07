@@ -1,9 +1,10 @@
 """Graft old-Penn train/val onto existing new-Penn folds (no re-split).
 
 Keeps ``new_penn`` Fold/Split so the new-Penn test set stays identical to the
-staged experiment. By default, new-Penn fold F gets old-Penn fold F train+val
-as extra ``Split=train`` (that fold's old test stays out). Pass
-``--old-source-fold N`` to reuse one old fold's train+val on every new fold.
+staged experiment. Old train+val become extra ``Split=train`` (never mixed
+into new-Penn val). A single-fold old split is reused on every new fold.
+Pass ``--old-source-fold N`` to pick the old fold; default matches indices
+unless the old CSV has only one fold.
 
 Patient leak guard: an old exam whose group id (``MRN``, or mapping-joined
 ``MRN``, else ``PennChart_EpicPatientId``) appears in that fold's new-Penn
@@ -27,10 +28,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from mst.data.patient_ids import normalize_patient_id as _norm_id  # noqa: E402
 
 OUT_ROOT = Path(r"D:\Users\arthur\Data\MST_birads4")
-NEW_SPLIT_CSV = OUT_ROOT / "new_penn_datasplit_v5_noBenHR.csv"
-OLD_SPLIT_CSV = OUT_ROOT / "old_penn_datasplit_noNewPenn.csv"
+NEW_SPLIT_CSV = OUT_ROOT / "new_penn_datasplit_v5_holdoutF0.csv"
+OLD_SPLIT_CSV = OUT_ROOT / "old_penn_datasplit_trainval.csv"
 OLD_MAPPING_CSV = OUT_ROOT / "old_penn_mapping.csv"
-OUTPUT_CSV = OUT_ROOT / "joint_penn_datasplit_v5.csv"
+OUTPUT_CSV = OUT_ROOT / "joint_penn_datasplit_holdoutF0.csv"
 
 REQUIRED_SPLIT_COLS = ("UID", "Fold", "Split", "Malignant")
 
@@ -131,6 +132,8 @@ def make_joint_datasplit(
 
     new_folds = sorted(new["Fold"].astype(str).str.strip().unique(), key=lambda x: int(x) if x.isdigit() else x)
     old_folds = set(old_fold.unique())
+    if old_source_fold is None and len(old_folds) == 1:
+        old_source_fold = int(next(iter(old_folds)))
     grafted_parts = []
     leak_by_fold: dict[str, int] = {}
     pool_n_by_fold: dict[str, int] = {}
