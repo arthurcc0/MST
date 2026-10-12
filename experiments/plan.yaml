@@ -107,13 +107,12 @@ experiments:
   # Each non-baseline input gets its own old-Penn stage 1; stage 2 inits
   # from that matching ckpt (not from P1 n32 MIP). n32 MIP is
   # P1_stage1_oldpenn_s / P1_staged_s; do not retrain it.
-  # Enable after n40 / d96 / d120 / gauss packs exist (old Penn included).
-  # Joint copies stay disabled unless that ranking changes; they already
-  # see the new input from scratch.
+  # Stage 1 enabled once the matching .h5 packs are on VAST (old Penn included).
+  # Stage 2 / joint stay disabled until those stage-1 ckpts exist.
   # ======================================================================
   - id: P2_stage1_oldpenn_s_slabs{slices}
     phase: 2
-    enabled: false
+    enabled: true
     description: Stage 1, {slices} MIP slabs on old Penn.
     grid: {slices: [40]}
     folds: [0]
@@ -121,7 +120,7 @@ experiments:
     train:
       penn_split_csv: old_penn_datasplit_trainval.csv
       high_risk_policy: exclude
-      path_root_data: final_cropped_and_masked_slabs_n{slices}_s3_o0_pad0
+      path_root_data: final_cropped_and_masked_slabs_n{slices}_s3_o0
 
   - id: P2_staged_s_slabs{slices}
     phase: 2
@@ -134,11 +133,11 @@ experiments:
       unfreeze_encoder_blocks: 2
       learning_rate: 1.0e-5
       encoder_lr: 1.0e-6
-      path_root_data: final_cropped_and_masked_slabs_n{slices}_s3_o0_pad0
+      path_root_data: final_cropped_and_masked_slabs_n{slices}_s3_o0
 
   - id: P2_stage1_oldpenn_s_raw{slices}
     phase: 2
-    enabled: false
+    enabled: true
     description: Stage 1, {slices} contiguous raw slices on old Penn.
     grid: {slices: [96, 120]}
     folds: [0]
@@ -163,7 +162,7 @@ experiments:
 
   - id: P2_stage1_oldpenn_s_gauss{slices}
     phase: 2
-    enabled: false
+    enabled: true
     description: Stage 1, {slices} gaussian-sampled raw slices on old Penn.
     grid: {slices: [32]}
     folds: [0]
@@ -193,7 +192,7 @@ experiments:
     grid: {slices: [40]}
     train:
       penn_split_csv: joint_penn_datasplit_holdoutF0.csv
-      path_root_data: final_cropped_and_masked_slabs_n{slices}_s3_o0_pad0
+      path_root_data: final_cropped_and_masked_slabs_n{slices}_s3_o0
 
   - id: P2_joint_s_raw{slices}
     phase: 2
