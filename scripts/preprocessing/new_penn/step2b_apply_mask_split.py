@@ -20,22 +20,20 @@ Writes ``crop_coordinates.csv`` under the output root with per-(patient, side)
 voxel ranges in the step1 ``pre.nii.gz`` space (TorchIO ``W, H, D``), so crops
 can be reproduced on the preprocessed (or upstream) volumes.
 
-Two depth-handling modes are supported:
+Three depth-handling modes are supported:
 
-* **slice mode (default)** — final shape is ``(H, W, D)`` taken from
-  ``--height/--width/--depth``. Output folder is
-  ``final_cropped_and_masked_data`` (or ``..._d{D}`` when D != 32).
-* **slab mode (``--slabs``)** — each output slice is a maximum-intensity
-  projection (MIP) of ``--slab_size`` adjacent slices, advanced by
-  ``--slab_size - --overlap`` slices between slabs, and centered along the
-  depth axis. Mask is applied **before** MIP so background voxels can't
-  dominate ``max``. When the source depth is insufficient to fit
-  ``--num_slabs`` slabs, the available slabs are still centered and the
-  stack is padded to ``--num_slabs`` with all-zero slabs (``--slab_pad zero``,
-  default; same value as the masked background) or by repeating the
-  first/last slab (``--slab_pad edge``, the original behaviour). Output folder
-  is ``final_cropped_and_masked_slabs_n{N}_s{S}_o{O}`` for ``edge`` and
-  ``..._n{N}_s{S}_o{O}_pad0`` for ``zero``, so the two never share a folder.
+* **slice mode (default)** — contiguous center crop/pad to ``(H, W, D)``.
+  Output folder: ``final_cropped_and_masked_data`` (or ``..._d{D}`` when D != 32).
+* **slab mode (``--slabs``)** — each output slice is a MIP of ``--slab_size``
+  adjacent slices. Mask is applied **before** MIP. Short volumes are padded
+  with zeros (``--slab_pad zero``, folder suffix ``_pad0``) or edge slabs.
+  Output: ``final_cropped_and_masked_slabs_n{N}_s{S}_o{O}[_pad0]``.
+* **gaussian mode (``--gauss``)** — ``--depth`` raw slices sampled from a
+  Normal(center, ``--gauss_sigma``) along D via quantile ``ppf``, clipped
+  away from the outer ``--gauss_edge`` fraction, then sorted so order is
+  anatomical. Ties from rounding are filled from unused central indices.
+  Output: ``final_cropped_and_masked_gauss_d{D}``. Sigma/edge stay in
+  ``gauss_stats.csv`` and ``crop_coordinates.csv``, not the folder name.
 """
 
 from __future__ import annotations
@@ -51,6 +49,7 @@ import pandas as pd
 import torch
 import torchio as tio
 from scipy.ndimage import rotate
+from scipy.stats import norm
 from tqdm import tqdm
 
 # Reuse the robust breast-crop helper from the existing penn-preprocessed pipeline.
@@ -78,6 +77,7 @@ OUT_ROOT = OUT_ROOT_BASE / "final_cropped_and_masked_data"
 # Slab-mode defaults. Activated when SLAB_PARAMS is not None (driven by --slabs).
 DEFAULT_SLAB_PARAMS = dict(num_slabs=32, slab_size=3, overlap=0, pad_mode="zero")
 SLAB_PAD_MODES = ("zero", "edge")
+DEFAULT_GAUSS_PARAMS = dict(sigma=20.0, edge_threshold=0.1)
 
 IMAGE_CHOICES = ("pre", "post", "sub")
 DEFAULT_IMAGES = ("sub",)
@@ -265,6 +265,98 @@ def _slab_source_depth_span(D: int, num_slabs: int, slab_size: int, overlap: int
     return record
 
 
+def gaussian_quantile_indices(
+    D: int,
+    n: int,
+    sigma: float = 20.0,
+    edge_threshold: float = 0.1,
+) -> tuple[np.ndarray, str]:
+    """Deterministic Normal-quantile slice indices along a depth of ``D``.
+
+    Samples ``n`` quantiles of N(D//2, sigma), clips to the inner
+    ``(1-2*edge_threshold)`` of the volume, unique-sorts. If rounding collapsed
+    some hits, unused indices in that window (then the full ``[0, D)``) are
+    filled from the center outward. Always returns increasing anatomical order.
+    """
+    D, n = int(D), int(n)
+    if D <= 0 or n <= 0:
+        return np.zeros(0, dtype=int), "empty"
+    if n >= D:
+        return np.arange(D, dtype=int), "all"
+
+    center = D // 2
+    low = max(0, int(D * edge_threshold))
+    high = min(D - 1, int(D * (1 - edge_threshold)))
+    if high < low:
+        low, high = 0, D - 1
+
+    q = np.clip(np.linspace(edge_threshold, 1.0 - edge_threshold, n), 1e-6, 1.0 - 1e-6)
+    z = np.clip(np.round(norm.ppf(q) * sigma + center), low, high).astype(int)
+    z = np.unique(z)
+    status = "ok"
+
+    def _fill(from_lo: int, from_hi: int, current: np.ndarray, needed: int) -> np.ndarray:
+        missing = np.setdiff1d(np.arange(from_lo, from_hi + 1), current)
+        if missing.size == 0 or needed <= 0:
+            return current
+        if missing.size > needed:
+            mid = missing.size // 2
+            start = max(0, mid - needed // 2)
+            missing = missing[start : start + needed]
+        return np.unique(np.concatenate([current, missing]))
+
+    if z.size < n:
+        z = _fill(low, high, z, n - z.size)
+        status = "filled"
+    if z.size < n:
+        z = _fill(0, D - 1, z, n - z.size)
+        status = "expanded"
+    if z.size > n:
+        mid = z.size // 2
+        start = max(0, mid - n // 2)
+        z = z[start : start + n]
+        status = "trimmed"
+    return z.astype(int), status
+
+
+def _sample_gaussian_slices(
+    volume_3d: np.ndarray,
+    num_slices: int,
+    sigma: float,
+    edge_threshold: float,
+) -> tuple[np.ndarray | None, dict]:
+    """Take ``num_slices`` along the last axis; zero-pad if the volume is thinner."""
+    D = int(volume_3d.shape[-1])
+    record = {
+        "status": "ok",
+        "depth": D,
+        "gauss_sigma": float(sigma),
+        "gauss_edge": float(edge_threshold),
+        "n_requested": int(num_slices),
+        "pre_pad": 0,
+        "post_pad": 0,
+        "gauss_z": "",
+    }
+    if D < 1:
+        record["status"] = "too_shallow"
+        return None, record
+
+    z, idx_status = gaussian_quantile_indices(D, num_slices, sigma, edge_threshold)
+    record["gauss_z"] = ",".join(str(int(i)) for i in z)
+    native = np.ascontiguousarray(volume_3d[..., z])
+    k = native.shape[-1]
+    record["k_native"] = k
+    record["status"] = idx_status
+    if k < num_slices:
+        pre = (num_slices - k) // 2
+        post = num_slices - k - pre
+        out = np.zeros(volume_3d.shape[:-1] + (num_slices,), dtype=native.dtype)
+        out[..., pre : pre + k] = native
+        record.update(status="padded_zero", pre_pad=pre, post_pad=post)
+        return out, record
+    return native, record
+
+
 def _side_subject_with_mask(side_subject: tio.Subject, mask_np: np.ndarray) -> tio.Subject:
     """Return a copy of ``side_subject`` with the mask tensor replaced."""
     return tio.Subject(
@@ -284,6 +376,7 @@ def _process_case(
     target_shape: tuple = TARGET_SHAPE,
     target_height: int = TARGET_HEIGHT,
     slab_params: dict = None,
+    gauss_params: dict = None,
     force: bool = False,
     mask_cc_min_fraction: float = MASK_CC_MIN_FRACTION,
     keep_uids: frozenset | None = None,
@@ -291,10 +384,9 @@ def _process_case(
 ) -> list:
     """Process a single case. Returns a list of per-(image, side) stats records.
 
-    When ``slab_params`` is None (default), behaves like the original
-    slice-mode pipeline. When provided (``num_slabs``, ``slab_size``,
-    ``overlap``), each output slice is a MIP slab of ``slab_size`` adjacent
-    source slices.
+    Depth mode: slice (default contiguous CropOrPad), slab (MIP), or gauss
+    (Normal-quantile raw slices). ``slab_params`` and ``gauss_params`` are
+    mutually exclusive.
     """
     in_root = Path(in_root_str)  # noqa: F841 (reserved for future relative-path use)
     mask_dir = Path(mask_dir_str)
@@ -378,12 +470,19 @@ def _process_case(
                 min_cc_fraction=0,
             )
             crop_transforms[side] = crop_transform_from_bounds(vertical_bounds[side])
-            mode = "slab" if slab_params is not None else "slice"
-            final_target = (
-                (int(target_shape[0]), int(target_shape[1]), int(slab_params["num_slabs"]))
-                if slab_params is not None
-                else tuple(int(x) for x in target_shape)
-            )
+            if slab_params is not None:
+                mode = "slab"
+                final_target = (
+                    int(target_shape[0]), int(target_shape[1]), int(slab_params["num_slabs"])
+                )
+            elif gauss_params is not None:
+                mode = "gauss"
+                final_target = (
+                    int(target_shape[0]), int(target_shape[1]), int(gauss_params["num_slices"])
+                )
+            else:
+                mode = "slice"
+                final_target = tuple(int(x) for x in target_shape)
             record = build_crop_coordinate_record(
                 patient_id=patient_id,
                 side=side,
@@ -399,15 +498,40 @@ def _process_case(
                 if slab_span.get("source_d_start") is not None:
                     record["full_d_start"] = slab_span["source_d_start"]
                     record["full_d_end"] = slab_span["source_d_end"]
+            elif gauss_params is not None:
+                z, idx_status = gaussian_quantile_indices(
+                    ref_shape[2],
+                    int(gauss_params["num_slices"]),
+                    float(gauss_params["sigma"]),
+                    float(gauss_params["edge_threshold"]),
+                )
+                record.update(
+                    gauss_sigma=float(gauss_params["sigma"]),
+                    gauss_edge=float(gauss_params["edge_threshold"]),
+                    gauss_status=idx_status,
+                    gauss_z=",".join(str(int(i)) for i in z),
+                    gauss_z_min=int(z[0]) if z.size else "",
+                    gauss_z_max=int(z[-1]) if z.size else "",
+                )
+                if z.size:
+                    record["source_d_start"] = int(z[0])
+                    record["source_d_end"] = int(z[-1]) + 1
+                    record["full_d_start"] = int(z[0])
+                    record["full_d_end"] = int(z[-1]) + 1
             crop_records.append(record)
         del pre_img, mask_label
 
-        if slab_params is None:
+        if slab_params is None and gauss_params is None:
             pad_transform = tio.CropOrPad(target_shape, padding_mode=0)
             inplane_pad = None
         else:
             pad_transform = None
-            inplane_target = (int(target_shape[0]), int(target_shape[1]), int(slab_params["num_slabs"]))
+            n_out = (
+                int(slab_params["num_slabs"])
+                if slab_params is not None
+                else int(gauss_params["num_slices"])
+            )
+            inplane_target = (int(target_shape[0]), int(target_shape[1]), n_out)
             inplane_pad = tio.CropOrPad(inplane_target, padding_mode=0)
 
         # ---- Save only requested image types (default: sub) ----
@@ -434,7 +558,7 @@ def _process_case(
                     cleaned_side_masks[side],
                 )
 
-                if slab_params is None:
+                if slab_params is None and gauss_params is None:
                     final_transform = tio.Compose([crop_transforms[side], pad_transform])
                     processed = final_transform(side_subject)
                     del side_subject
@@ -457,33 +581,42 @@ def _process_case(
 
                     img_arr = breast_cropped.image.data.squeeze().numpy().astype(np.float32)
                     msk_arr = breast_cropped.mask.data.squeeze().numpy().astype(np.float32)
-                    masked_vol = img_arr * msk_arr  # mask before MIP
+                    masked_vol = img_arr * msk_arr
                     del img_arr, msk_arr
 
-                    slabs, record = _compute_slabs(masked_vol, **slab_params)
+                    if slab_params is not None:
+                        stacked, record = _compute_slabs(masked_vol, **slab_params)
+                    else:
+                        stacked, record = _sample_gaussian_slices(
+                            masked_vol,
+                            int(gauss_params["num_slices"]),
+                            float(gauss_params["sigma"]),
+                            float(gauss_params["edge_threshold"]),
+                        )
                     record.update(patient_id=patient_id, side=side, image=path_img.name)
                     stats_out.append(record)
                     del masked_vol
 
-                    if slabs is None:
-                        # too shallow for even one slab: skip writing this side+image.
+                    if stacked is None:
                         del breast_cropped
                         continue
 
-                    slab_tensor = torch.from_numpy(np.ascontiguousarray(slabs)).unsqueeze(0)
-                    slab_subject = tio.Subject(
-                        image=tio.ScalarImage(tensor=slab_tensor, affine=breast_cropped.image.affine)
+                    stacked_tensor = torch.from_numpy(np.ascontiguousarray(stacked)).unsqueeze(0)
+                    stacked_subject = tio.Subject(
+                        image=tio.ScalarImage(
+                            tensor=stacked_tensor, affine=breast_cropped.image.affine
+                        )
                     )
-                    del breast_cropped, slabs
+                    del breast_cropped, stacked
 
-                    processed = inplane_pad(slab_subject)
+                    processed = inplane_pad(stacked_subject)
                     out_dir = out_root / f"{patient_id}_{side}"
                     out_dir.mkdir(parents=True, exist_ok=True)
                     tio.ScalarImage(
                         tensor=processed.image.data,
                         affine=processed.image.affine,
                     ).save(out_dir / path_img.name)
-                    del slab_subject, processed
+                    del stacked_subject, processed
             del subject
 
     except Exception as e:
@@ -545,6 +678,12 @@ CROP_COORD_FIELDNAMES = [
     "slab_k_native",
     "slab_stride",
     "slab_size",
+    "gauss_sigma",
+    "gauss_edge",
+    "gauss_status",
+    "gauss_z_min",
+    "gauss_z_max",
+    "gauss_z",
 ]
 
 
@@ -601,10 +740,51 @@ def _summarize_slab_stats(records: list, out_csv: Path, slab_params: dict) -> No
     )
 
 
+def _summarize_gauss_stats(records: list, out_csv: Path, gauss_params: dict) -> None:
+    import csv
+    from statistics import median, mean
+
+    if not records:
+        print("[gauss] no gaussian-sample records produced (nothing to summarize).")
+        return
+
+    fieldnames = [
+        "patient_id", "side", "image", "depth", "status",
+        "k_native", "pre_pad", "post_pad", "gauss_z",
+    ]
+    with open(out_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in records:
+            writer.writerow({k: r.get(k, "") for k in fieldnames})
+
+    by_status = {}
+    for r in records:
+        by_status[r["status"]] = by_status.get(r["status"], 0) + 1
+    depths = [r["depth"] for r in records]
+    n = int(gauss_params["num_slices"])
+    status_line = ", ".join(f"{k}={v}" for k, v in sorted(by_status.items()))
+    print(
+        "\n[gauss summary] (image, side) records:"
+        f"\n  total:        {len(records)}"
+        f"\n  n_requested:  {n}  sigma={gauss_params['sigma']}  "
+        f"edge={gauss_params['edge_threshold']}"
+        f"\n  status:       {status_line}"
+        f"\n  source depth: min={min(depths)}, median={median(depths):.1f}, "
+        f"mean={mean(depths):.1f}, max={max(depths)}"
+        f"\n  details:      {out_csv}"
+    )
+
+
+def _gauss_folder_name(num_slices: int) -> str:
+    return f"final_cropped_and_masked_gauss_d{int(num_slices)}"
+
+
 def main(
     target_shape: tuple = TARGET_SHAPE,
     out_root: Path = OUT_ROOT,
     slab_params: dict = None,
+    gauss_params: dict = None,
     num_workers: int = NUM_WORKERS,
     pool_chunksize: int = 1,
     force: bool = False,
@@ -633,12 +813,18 @@ def main(
         patient_dirs = [p for p in patient_dirs if p.name == "73032737"] # Specify the case to process
         # patient_dirs = patient_dirs[:1]
         print(f"[DEBUG_SINGLE] only processing: {[p.name for p in patient_dirs]}")
-    mode_desc = (
-        f"slab mode (N={slab_params['num_slabs']}, S={slab_params['slab_size']}, "
-        f"O={slab_params['overlap']}, pad={slab_params['pad_mode']})"
-        if slab_params is not None
-        else f"slice mode (target_shape={target_shape})"
-    )
+    if slab_params is not None:
+        mode_desc = (
+            f"slab mode (N={slab_params['num_slabs']}, S={slab_params['slab_size']}, "
+            f"O={slab_params['overlap']}, pad={slab_params['pad_mode']})"
+        )
+    elif gauss_params is not None:
+        mode_desc = (
+            f"gauss mode (n={gauss_params['num_slices']}, "
+            f"sigma={gauss_params['sigma']}, edge={gauss_params['edge_threshold']})"
+        )
+    else:
+        mode_desc = f"slice mode (target_shape={target_shape})"
     n_workers = max(1, int(num_workers))
     print(
         f"Processing {len(patient_dirs)} cases. Output: {out_root}  [{mode_desc}]  "
@@ -657,6 +843,7 @@ def main(
         target_shape=tuple(target_shape),
         target_height=int(target_shape[0]),
         slab_params=slab_params,
+        gauss_params=gauss_params,
         force=force,
         mask_cc_min_fraction=mask_cc_min_fraction,
         keep_uids=keep_uids_fs,
@@ -684,6 +871,8 @@ def main(
 
     if slab_params is not None:
         _summarize_slab_stats(all_stats, out_root / "slab_stats.csv", slab_params)
+    elif gauss_params is not None:
+        _summarize_gauss_stats(all_stats, out_root / "gauss_stats.csv", gauss_params)
 
     print("Mask + crop/split done.")
 
@@ -693,11 +882,13 @@ if __name__ == "__main__":
     parser.add_argument('--height', type=int, default=DEFAULT_TARGET_SHAPE[0], help='Target H (in-plane).')
     parser.add_argument('--width', type=int, default=DEFAULT_TARGET_SHAPE[1], help='Target W (in-plane).')
     parser.add_argument('--depth', type=int, default=DEFAULT_TARGET_SHAPE[2],
-                        help='Target D (number of slices). Ignored in slab mode (D = --num_slabs).')
+                        help='Target D (number of slices). Used in slice and gauss modes; '
+                             'ignored in slab mode (D = --num_slabs).')
     parser.add_argument('--out_dir', type=str, default=None,
-                        help='Override output directory. Default for slice mode: '
-                             'OUT_ROOT_BASE/final_cropped_and_masked_data[_d{D}] when D != 32. '
-                             'Default for slab mode: OUT_ROOT_BASE/final_cropped_and_masked_slabs_n{N}_s{S}_o{O}.')
+                        help='Override output directory. Defaults: slice '
+                             'final_cropped_and_masked_data[_d{D}]; slab '
+                             'final_cropped_and_masked_slabs_n{N}_s{S}_o{O}[_pad0]; '
+                             'gauss final_cropped_and_masked_gauss_d{D}.')
     # --- Slab mode ---
     parser.add_argument('--slabs', action='store_true', default=False,
                         help='Activate slab (MIP) mode along the depth axis.')
@@ -711,6 +902,13 @@ if __name__ == "__main__":
     parser.add_argument('--slab_pad', choices=SLAB_PAD_MODES, default=DEFAULT_SLAB_PARAMS['pad_mode'],
                         help="How to fill slabs beyond the source depth: 'zero' (default; folder suffix "
                              "_pad0) or 'edge' (repeat first/last slab; original, unsuffixed folders).")
+    parser.add_argument('--gauss', action='store_true', default=False,
+                        help='Sample --depth raw slices from a Normal around the volume center '
+                             '(quantile ppf). Mutually exclusive with --slabs.')
+    parser.add_argument('--gauss_sigma', type=float, default=DEFAULT_GAUSS_PARAMS['sigma'],
+                        help='Std-dev (in slices) of the Normal used for quantile sampling.')
+    parser.add_argument('--gauss_edge', type=float, default=DEFAULT_GAUSS_PARAMS['edge_threshold'],
+                        help='Fraction of D excluded at each end (default 0.1).')
     parser.add_argument(
         '--num_workers',
         type=int,
@@ -763,10 +961,16 @@ if __name__ == "__main__":
     )
     cli_args = parser.parse_args()
 
+    if cli_args.slabs and cli_args.gauss:
+        parser.error('choose one of --slabs or --gauss.')
     if cli_args.slabs and cli_args.overlap >= cli_args.slab_size:
         parser.error(f'--overlap ({cli_args.overlap}) must be < --slab_size ({cli_args.slab_size}).')
+    if cli_args.gauss and not (0.0 <= cli_args.gauss_edge < 0.5):
+        parser.error('--gauss_edge must be in [0, 0.5).')
 
     cli_target_shape = (int(cli_args.height), int(cli_args.width), int(cli_args.depth))
+    cli_slab_params = None
+    cli_gauss_params = None
 
     if cli_args.slabs:
         cli_slab_params = dict(
@@ -785,8 +989,18 @@ if __name__ == "__main__":
                 f"_o{cli_slab_params['overlap']}"
                 f"{'_pad0' if cli_slab_params['pad_mode'] == 'zero' else ''}"
             )
+    elif cli_args.gauss:
+        cli_gauss_params = dict(
+            num_slices=int(cli_args.depth),
+            sigma=float(cli_args.gauss_sigma),
+            edge_threshold=float(cli_args.gauss_edge),
+        )
+        cli_out_root = (
+            Path(cli_args.out_dir)
+            if cli_args.out_dir is not None
+            else OUT_ROOT_BASE / _gauss_folder_name(cli_gauss_params["num_slices"])
+        )
     else:
-        cli_slab_params = None
         if cli_args.out_dir is not None:
             cli_out_root = Path(cli_args.out_dir)
         elif cli_target_shape[2] != DEFAULT_TARGET_SHAPE[2]:
@@ -806,6 +1020,7 @@ if __name__ == "__main__":
         target_shape=cli_target_shape,
         out_root=cli_out_root,
         slab_params=cli_slab_params,
+        gauss_params=cli_gauss_params,
         num_workers=cli_args.num_workers,
         pool_chunksize=cli_args.pool_chunksize,
         force=bool(cli_args.force),

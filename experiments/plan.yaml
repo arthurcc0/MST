@@ -103,16 +103,32 @@ experiments:
       penn_split_csv: joint_penn_datasplit_holdoutF0.csv
 
   # ======================================================================
-  # Phase 2 — input (MIP vs raw). Enable after n40 / d96 / d120 packs exist.
-  # n32 MIP is the phase 1 baseline; do not retrain it. Copy the phase 1
-  # winner (staged or joint) into the train / init_from blocks before enabling.
+  # Phase 2 — input: MIP vs contiguous raw vs gaussian-quantile sampling.
+  # Each non-baseline input gets its own old-Penn stage 1; stage 2 inits
+  # from that matching ckpt (not from P1 n32 MIP). n32 MIP is
+  # P1_stage1_oldpenn_s / P1_staged_s; do not retrain it.
+  # Enable after n40 / d96 / d120 / gauss packs exist (old Penn included).
+  # Joint copies stay disabled unless that ranking changes; they already
+  # see the new input from scratch.
   # ======================================================================
+  - id: P2_stage1_oldpenn_s_slabs{slices}
+    phase: 2
+    enabled: false
+    description: Stage 1, {slices} MIP slabs on old Penn.
+    grid: {slices: [40]}
+    folds: [0]
+    eval: false
+    train:
+      penn_split_csv: old_penn_datasplit_trainval.csv
+      high_risk_policy: exclude
+      path_root_data: final_cropped_and_masked_slabs_n{slices}_s3_o0_pad0
+
   - id: P2_staged_s_slabs{slices}
     phase: 2
     enabled: false
     description: Stage 2, {slices} MIP slabs (n40 = 120 z).
     grid: {slices: [40]}
-    init_from: {experiment: P1_stage1_oldpenn_s, fold: 0}
+    init_from: {experiment: "P2_stage1_oldpenn_s_slabs{slices}", fold: 0}
     train:
       penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
       unfreeze_encoder_blocks: 2
@@ -120,18 +136,55 @@ experiments:
       encoder_lr: 1.0e-6
       path_root_data: final_cropped_and_masked_slabs_n{slices}_s3_o0_pad0
 
+  - id: P2_stage1_oldpenn_s_raw{slices}
+    phase: 2
+    enabled: false
+    description: Stage 1, {slices} contiguous raw slices on old Penn.
+    grid: {slices: [96, 120]}
+    folds: [0]
+    eval: false
+    train:
+      penn_split_csv: old_penn_datasplit_trainval.csv
+      high_risk_policy: exclude
+      path_root_data: final_cropped_and_masked_data_d{slices}
+
   - id: P2_staged_s_raw{slices}
     phase: 2
     enabled: false
-    description: Stage 2, {slices} raw slices (96 = n32 span; 120 = n40 span).
+    description: Stage 2, {slices} contiguous raw slices (96 = n32 span; 120 = n40 span).
     grid: {slices: [96, 120]}
-    init_from: {experiment: P1_stage1_oldpenn_s, fold: 0}
+    init_from: {experiment: "P2_stage1_oldpenn_s_raw{slices}", fold: 0}
     train:
       penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
       unfreeze_encoder_blocks: 2
       learning_rate: 1.0e-5
       encoder_lr: 1.0e-6
       path_root_data: final_cropped_and_masked_data_d{slices}
+
+  - id: P2_stage1_oldpenn_s_gauss{slices}
+    phase: 2
+    enabled: false
+    description: Stage 1, {slices} gaussian-sampled raw slices on old Penn.
+    grid: {slices: [32]}
+    folds: [0]
+    eval: false
+    train:
+      penn_split_csv: old_penn_datasplit_trainval.csv
+      high_risk_policy: exclude
+      path_root_data: final_cropped_and_masked_gauss_d{slices}
+
+  - id: P2_staged_s_gauss{slices}
+    phase: 2
+    enabled: false
+    description: Stage 2, {slices} raw slices sampled from N(center, sigma=20).
+    grid: {slices: [32]}
+    init_from: {experiment: "P2_stage1_oldpenn_s_gauss{slices}", fold: 0}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+      path_root_data: final_cropped_and_masked_gauss_d{slices}
 
   - id: P2_joint_s_slabs{slices}
     phase: 2
@@ -145,11 +198,20 @@ experiments:
   - id: P2_joint_s_raw{slices}
     phase: 2
     enabled: false
-    description: Joint, {slices} raw slices.
+    description: Joint, {slices} contiguous raw slices.
     grid: {slices: [96, 120]}
     train:
       penn_split_csv: joint_penn_datasplit_holdoutF0.csv
       path_root_data: final_cropped_and_masked_data_d{slices}
+
+  - id: P2_joint_s_gauss{slices}
+    phase: 2
+    enabled: false
+    description: Joint, {slices} gaussian-sampled raw slices.
+    grid: {slices: [32]}
+    train:
+      penn_split_csv: joint_penn_datasplit_holdoutF0.csv
+      path_root_data: final_cropped_and_masked_gauss_d{slices}
 
   # ======================================================================
   # Phase 3 — backbone size and DINOv2 vs DINOv3, on the phase 1–2 winner.

@@ -699,7 +699,8 @@ def write_summary(machine: Machine, exps: list[Experiment], plan_dir: Path) -> p
 
 def print_status(df: pd.DataFrame) -> None:
     cols = [c for c in ("phase", "experiment", "status", "folds_trained", "folds_evaluated",
-                        "val_auc_mean", "test_auc_mean", "test_auc_std", "blocked_by")
+                        "val_auc_mean", "val_auc_std", "test_auc_mean", "test_auc_std",
+                        "blocked_by")
             if c in df.columns]
     view = df[cols].copy()
     if "blocked_by" in view.columns:
