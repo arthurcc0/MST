@@ -16,7 +16,7 @@
 # https://docs.parcc.upenn.edu/docs/notes/filter.html
 #SBATCH --cpus-per-task=14
 #SBATCH --mem=112G
-#SBATCH --time=24:00:00
+#SBATCH --time=6:00:00
 #SBATCH --output=experiments/logs/slurm/%x_%j.out
 #SBATCH --error=experiments/logs/slurm/%x_%j.err
 

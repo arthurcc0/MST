@@ -13,7 +13,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=28
 #SBATCH --mem=224G
-#SBATCH --time=24:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=experiments/logs/slurm/%x_%j.out
 #SBATCH --error=experiments/logs/slurm/%x_%j.err
 
