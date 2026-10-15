@@ -104,15 +104,21 @@ experiments:
 
   # ======================================================================
   # Phase 2 — input: MIP vs contiguous raw vs gaussian-quantile sampling.
+  # Question: does more depth (n40 MIP / raw 96–120) help, or is n32 MIP
+  # / gauss-32 enough under a memory cap? n40 MIP = 120 z (dataset median).
   # Each non-baseline input gets its own old-Penn stage 1; stage 2 inits
   # from that matching ckpt (not from P1 n32 MIP). n32 MIP is
   # P1_stage1_oldpenn_s / P1_staged_s; do not retrain it.
-  # Stage 1 enabled once the matching .h5 packs are on VAST (old Penn included).
-  # Stage 2 / joint stay disabled until those stage-1 ckpts exist.
+  # Staged is the P1 winner; joint copies stay off unless that ranking changes.
+  #
+  # Result (val_auc_mean, inner 5-fold): P1_staged_s n32 MIP 0.7449;
+  # raw 96 0.7303; raw 120 0.7302; n40 MIP 0.7288; gauss-32 0.7285.
+  # Under the rank-on-val rule, freeze n32 MIP. Cost of n40 is ~25% more
+  # ViT forwards, not a reason to override the val ranking.
   # ======================================================================
   - id: P2_stage1_oldpenn_s_slabs{slices}
     phase: 2
-    enabled: true
+    enabled: false
     description: Stage 1, {slices} MIP slabs on old Penn.
     grid: {slices: [40]}
     folds: [0]
@@ -137,7 +143,7 @@ experiments:
 
   - id: P2_stage1_oldpenn_s_raw{slices}
     phase: 2
-    enabled: true
+    enabled: false
     description: Stage 1, {slices} contiguous raw slices on old Penn.
     grid: {slices: [96, 120]}
     folds: [0]
@@ -162,7 +168,7 @@ experiments:
 
   - id: P2_stage1_oldpenn_s_gauss{slices}
     phase: 2
-    enabled: true
+    enabled: false
     description: Stage 1, {slices} gaussian-sampled raw slices on old Penn.
     grid: {slices: [32]}
     folds: [0]
@@ -213,24 +219,62 @@ experiments:
       path_root_data: final_cropped_and_masked_gauss_d{slices}
 
   # ======================================================================
-  # Phase 3 — backbone size and DINOv2 vs DINOv3, on the phase 1–2 winner.
-  # Copy input path / slices and init_from into the train blocks first.
+  # Phase 2b — tissue-weight confound (optional, not ahead of size).
+  # P2 ran with weighting ON for every input. n32 MIP barely uses the gate;
+  # raw-120 uses it a lot. Two inner folds only; compare to existing ON
+  # numbers (P1_staged_s 0.7449, P2_staged_s_raw120 0.7302). If raw-120
+  # off does not approach n32 MIP, leave the input freeze in place.
+  # ======================================================================
+  - id: P2b_staged_s_weightOff
+    phase: 2
+    enabled: false
+    description: Stage 2, n32 MIP, tissue weighting off (folds 0–1 screen).
+    folds: [0, 1]
+    init_from: {experiment: P1_stage1_oldpenn_s, fold: 0}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+      slab_tissue_soft_weight: false
+
+  - id: P2b_staged_s_raw120_weightOff
+    phase: 2
+    enabled: false
+    description: Stage 2, raw 120, tissue weighting off (folds 0–1 screen).
+    folds: [0, 1]
+    init_from: {experiment: P2_stage1_oldpenn_s_raw120, fold: 0}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+      slices: 120
+      path_root_data: final_cropped_and_masked_data_d120
+      slab_tissue_soft_weight: false
+
+  # ======================================================================
+  # Phase 3 — backbone size and DINOv2 vs DINOv3, on frozen n32 MIP staged.
+  # ViT-S is P1_staged_s; do not retrain it. Joint size copies stay off.
+  # Explicit path/slices so later default edits cannot silently change input.
   # ======================================================================
   - id: P3_stage1_oldpenn_{model_size}
     phase: 3
     enabled: false
-    description: Stage 1, DINOv2-{model_size} (s is P1_stage1_oldpenn_s).
+    description: Stage 1, DINOv2-{model_size} n32 MIP (s is P1_stage1_oldpenn_s).
     grid: {model_size: [b, l]}
     folds: [0]
     eval: false
     train:
       penn_split_csv: old_penn_datasplit_trainval.csv
       high_risk_policy: exclude
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
 
   - id: P3_staged_{model_size}
     phase: 3
     enabled: false
-    description: Stage 2, DINOv2-{model_size}.
+    description: Stage 2, DINOv2-{model_size}, n32 MIP.
     grid: {model_size: [b, l]}
     init_from: {experiment: "P3_stage1_oldpenn_{model_size}", fold: 0}
     train:
@@ -238,11 +282,13 @@ experiments:
       unfreeze_encoder_blocks: 2
       learning_rate: 1.0e-5
       encoder_lr: 1.0e-6
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
 
   - id: P3_stage1_oldpenn_v3_{model_size}
     phase: 3
     enabled: false
-    description: Stage 1, DINOv3-{model_size}.
+    description: Stage 1, DINOv3-{model_size}, n32 MIP.
     grid: {model_size: [s, b, l]}
     folds: [0]
     eval: false
@@ -250,11 +296,13 @@ experiments:
       model_name: DinoClassifierSliceV3
       penn_split_csv: old_penn_datasplit_trainval.csv
       high_risk_policy: exclude
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
 
   - id: P3_staged_v3_{model_size}
     phase: 3
     enabled: false
-    description: Stage 2, DINOv3-{model_size}.
+    description: Stage 2, DINOv3-{model_size}, n32 MIP.
     grid: {model_size: [s, b, l]}
     init_from: {experiment: "P3_stage1_oldpenn_v3_{model_size}", fold: 0}
     train:
@@ -263,17 +311,22 @@ experiments:
       unfreeze_encoder_blocks: 2
       learning_rate: 1.0e-5
       encoder_lr: 1.0e-6
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
 
   - id: P3_joint_{model_size}
     phase: 3
     enabled: false
-    description: Joint, DINOv2-{model_size} (only if joint wins phase 1).
+    description: Joint, DINOv2-{model_size} (staged won phase 1; leave off).
     grid: {model_size: [b, l]}
     train:
       penn_split_csv: joint_penn_datasplit_holdoutF0.csv
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
 
   # ======================================================================
   # Phase 4 — loss. Balanced CE is the phase 1–3 baseline; no rerun.
+  # After phase 3, copy the winning model_size / init_from into these blocks.
   # ======================================================================
   - id: P4_staged_{model_size}_ceNoWeight
     phase: 4
@@ -320,7 +373,9 @@ experiments:
       loss: focal
 
   # ======================================================================
-  # Phase 5 — unfreeze / LR, on the chosen size and input.
+  # Phase 5 — unfreeze / LR, on frozen n32 MIP and the phase-3 size winner.
+  # After phase 3, copy model_size / init_from; prune unfreeze 1 and encoder_lr
+  # > head LR before enabling.
   # ======================================================================
   - id: P5_staged_{model_size}_unfrz{unfreeze_encoder_blocks}_lr{learning_rate}_enc{encoder_lr}
     phase: 5
