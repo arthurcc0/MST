@@ -219,38 +219,90 @@ experiments:
       path_root_data: final_cropped_and_masked_gauss_d{slices}
 
   # ======================================================================
-  # Phase 2b — tissue-weight confound (optional, not ahead of size).
-  # P2 ran with weighting ON for every input. n32 MIP barely uses the gate;
-  # raw-120 uses it a lot. Two inner folds only; compare to existing ON
-  # numbers (P1_staged_s 0.7449, P2_staged_s_raw120 0.7302). If raw-120
-  # off does not approach n32 MIP, leave the input freeze in place.
+  # Phase 2b — tissue weighting OFF, matched stage 1 + inner 5-fold stage 2.
+  # Compare n32 MIP vs gauss-32 vs raw 96 (n32 MIP span). P2 ran these with
+  # weighting ON (P1_staged_s 0.7449, gauss-32 0.7285, raw 96 0.7303). Do
+  # not reuse those stage-1 ckpts: stage 1 here also has the gate off.
   # ======================================================================
-  - id: P2b_staged_s_weightOff
+  - id: P2b_stage1_oldpenn_s_mip_weightOff
     phase: 2
-    enabled: false
-    description: Stage 2, n32 MIP, tissue weighting off (folds 0–1 screen).
-    folds: [0, 1]
-    init_from: {experiment: P1_stage1_oldpenn_s, fold: 0}
+    enabled: true
+    description: Stage 1, n32 MIP, tissue weighting off.
+    folds: [0]
+    eval: false
     train:
-      penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
-      unfreeze_encoder_blocks: 2
-      learning_rate: 1.0e-5
-      encoder_lr: 1.0e-6
+      penn_split_csv: old_penn_datasplit_trainval.csv
+      high_risk_policy: exclude
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
       slab_tissue_soft_weight: false
 
-  - id: P2b_staged_s_raw120_weightOff
+  - id: P2b_staged_s_mip_weightOff
     phase: 2
     enabled: false
-    description: Stage 2, raw 120, tissue weighting off (folds 0–1 screen).
-    folds: [0, 1]
-    init_from: {experiment: P2_stage1_oldpenn_s_raw120, fold: 0}
+    description: Stage 2, n32 MIP, tissue weighting off.
+    init_from: {experiment: P2b_stage1_oldpenn_s_mip_weightOff, fold: 0}
     train:
       penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
       unfreeze_encoder_blocks: 2
       learning_rate: 1.0e-5
       encoder_lr: 1.0e-6
-      slices: 120
-      path_root_data: final_cropped_and_masked_data_d120
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
+      slab_tissue_soft_weight: false
+
+  - id: P2b_stage1_oldpenn_s_gauss32_weightOff
+    phase: 2
+    enabled: true
+    description: Stage 1, gauss-32, tissue weighting off.
+    folds: [0]
+    eval: false
+    train:
+      penn_split_csv: old_penn_datasplit_trainval.csv
+      high_risk_policy: exclude
+      path_root_data: final_cropped_and_masked_gauss_d32
+      slices: 32
+      slab_tissue_soft_weight: false
+
+  - id: P2b_staged_s_gauss32_weightOff
+    phase: 2
+    enabled: false
+    description: Stage 2, gauss-32, tissue weighting off.
+    init_from: {experiment: P2b_stage1_oldpenn_s_gauss32_weightOff, fold: 0}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+      path_root_data: final_cropped_and_masked_gauss_d32
+      slices: 32
+      slab_tissue_soft_weight: false
+
+  - id: P2b_stage1_oldpenn_s_raw96_weightOff
+    phase: 2
+    enabled: true
+    description: Stage 1, raw 96, tissue weighting off.
+    folds: [0]
+    eval: false
+    train:
+      penn_split_csv: old_penn_datasplit_trainval.csv
+      high_risk_policy: exclude
+      path_root_data: final_cropped_and_masked_data_d96
+      slices: 96
+      slab_tissue_soft_weight: false
+
+  - id: P2b_staged_s_raw96_weightOff
+    phase: 2
+    enabled: false
+    description: Stage 2, raw 96, tissue weighting off.
+    init_from: {experiment: P2b_stage1_oldpenn_s_raw96_weightOff, fold: 0}
+    train:
+      penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+      path_root_data: final_cropped_and_masked_data_d96
+      slices: 96
       slab_tissue_soft_weight: false
 
   # ======================================================================
@@ -273,7 +325,7 @@ experiments:
 
   - id: P3_staged_{model_size}
     phase: 3
-    enabled: false
+    enabled: true
     description: Stage 2, DINOv2-{model_size}, n32 MIP.
     grid: {model_size: [b, l]}
     init_from: {experiment: "P3_stage1_oldpenn_{model_size}", fold: 0}
@@ -301,7 +353,7 @@ experiments:
 
   - id: P3_staged_v3_{model_size}
     phase: 3
-    enabled: false
+    enabled: true
     description: Stage 2, DINOv3-{model_size}, n32 MIP.
     grid: {model_size: [s, b, l]}
     init_from: {experiment: "P3_stage1_oldpenn_v3_{model_size}", fold: 0}
