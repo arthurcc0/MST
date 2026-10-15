@@ -260,7 +260,7 @@ experiments:
   # ======================================================================
   - id: P3_stage1_oldpenn_{model_size}
     phase: 3
-    enabled: false
+    enabled: true
     description: Stage 1, DINOv2-{model_size} n32 MIP (s is P1_stage1_oldpenn_s).
     grid: {model_size: [b, l]}
     folds: [0]
@@ -287,7 +287,7 @@ experiments:
 
   - id: P3_stage1_oldpenn_v3_{model_size}
     phase: 3
-    enabled: false
+    enabled: true
     description: Stage 1, DINOv3-{model_size}, n32 MIP.
     grid: {model_size: [s, b, l]}
     folds: [0]
