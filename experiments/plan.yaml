@@ -12,6 +12,10 @@
 # After a winner is frozen, retrain it with each outer group as holdout and
 # pool those five test predictions for the reported AUC.
 #
+# Frozen: staged + n32 MIP + DINOv3-B (P3_staged_v3_b, val 0.7525).
+# Tissue weighting ON (keep_ratio=0.5, min_weight=0.1). P2b turned the
+# whole gate off (all tokens weight 1); AUC tied, keep ON for attention maps.
+#
 # Splits:
 #   new_penn_datasplit_v5_holdoutF0.csv
 #   old_penn_datasplit_trainval.csv          # no old-Penn test; more stage-1 data
@@ -219,10 +223,11 @@ experiments:
       path_root_data: final_cropped_and_masked_gauss_d{slices}
 
   # ======================================================================
-  # Phase 2b — tissue weighting OFF, matched stage 1 + inner 5-fold stage 2.
-  # Compare n32 MIP vs gauss-32 vs raw 96 (n32 MIP span). P2 ran these with
-  # weighting ON (P1_staged_s 0.7449, gauss-32 0.7285, raw 96 0.7303). Do
-  # not reuse those stage-1 ckpts: stage 1 here also has the gate off.
+  # Phase 2b — whole tissue-weight gate OFF (not just the 0.1 floor).
+  # OFF: no keep_ratio hinge, no min_weight; every slice token is 1.0.
+  # ON (default): planes with tissue < 0.5 * max(frac) ramp down toward 0.1.
+  # Matched stage 1 + inner 5-fold. MIP / gauss-32 / raw 96 AUC tied with ON;
+  # keep the gate ON for attention-map visualization.
   # ======================================================================
   - id: P2b_stage1_oldpenn_s_mip_weightOff
     phase: 2
@@ -377,78 +382,95 @@ experiments:
       slices: 32
 
   # ======================================================================
-  # Phase 4 — loss. Balanced CE is the phase 1–3 baseline; no rerun.
-  # After phase 3, copy the winning model_size / init_from into these blocks.
+  # Phase 4 — loss, on frozen DINOv3-B n32 MIP. Balanced CE is P3_staged_v3_b
+  # (0.7525); do not rerun it. Tissue weighting stays ON.
   # ======================================================================
-  - id: P4_staged_{model_size}_ceNoWeight
+  - id: P4_staged_v3_{model_size}_ceNoWeight
     phase: 4
     enabled: false
-    description: Stage 2, unweighted CE.
-    grid: {model_size: [s]}
-    init_from: {experiment: P1_stage1_oldpenn_s, fold: 0}
+    description: Stage 2, DINOv3-{model_size}, unweighted CE.
+    grid: {model_size: [b]}
+    init_from: {experiment: P3_stage1_oldpenn_v3_b, fold: 0}
     train:
+      model_name: DinoClassifierSliceV3
       penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
       unfreeze_encoder_blocks: 2
       learning_rate: 1.0e-5
       encoder_lr: 1.0e-6
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
       class_weight: none
 
-  - id: P4_staged_{model_size}_focal_g{focal_gamma}_a{focal_alpha}
+  - id: P4_staged_v3_{model_size}_focal_g{focal_gamma}_a{focal_alpha}
     phase: 4
     enabled: false
-    description: Stage 2, focal loss.
-    grid: {model_size: [s], focal_gamma: [2.0], focal_alpha: [balanced]}
-    init_from: {experiment: P1_stage1_oldpenn_s, fold: 0}
+    description: Stage 2, DINOv3-{model_size}, focal loss.
+    grid: {model_size: [b], focal_gamma: [2.0], focal_alpha: [balanced]}
+    init_from: {experiment: P3_stage1_oldpenn_v3_b, fold: 0}
     train:
+      model_name: DinoClassifierSliceV3
       penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
       unfreeze_encoder_blocks: 2
       learning_rate: 1.0e-5
       encoder_lr: 1.0e-6
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
       loss: focal
 
-  - id: P4_joint_{model_size}_ceNoWeight
+  - id: P4_joint_v3_{model_size}_ceNoWeight
     phase: 4
     enabled: false
-    description: Joint, unweighted CE.
-    grid: {model_size: [s]}
+    description: Joint, DINOv3-{model_size}, unweighted CE (staged won; leave off).
+    grid: {model_size: [b]}
     train:
+      model_name: DinoClassifierSliceV3
       penn_split_csv: joint_penn_datasplit_holdoutF0.csv
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
       class_weight: none
 
-  - id: P4_joint_{model_size}_focal_g{focal_gamma}_a{focal_alpha}
+  - id: P4_joint_v3_{model_size}_focal_g{focal_gamma}_a{focal_alpha}
     phase: 4
     enabled: false
-    description: Joint, focal loss.
-    grid: {model_size: [s], focal_gamma: [2.0], focal_alpha: [balanced]}
+    description: Joint, DINOv3-{model_size}, focal loss (staged won; leave off).
+    grid: {model_size: [b], focal_gamma: [2.0], focal_alpha: [balanced]}
     train:
+      model_name: DinoClassifierSliceV3
       penn_split_csv: joint_penn_datasplit_holdoutF0.csv
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
       loss: focal
 
   # ======================================================================
-  # Phase 5 — unfreeze / LR, on frozen n32 MIP and the phase-3 size winner.
-  # After phase 3, copy model_size / init_from; prune unfreeze 1 and encoder_lr
-  # > head LR before enabling.
+  # Phase 5 — unfreeze / LR, DINOv3-B n32 MIP. Baseline is unfreeze 2,
+  # head 1e-5, encoder 1e-6 (P3_staged_v3_b). Drop unfreeze=1. Weighting ON.
   # ======================================================================
-  - id: P5_staged_{model_size}_unfrz{unfreeze_encoder_blocks}_lr{learning_rate}_enc{encoder_lr}
+  - id: P5_staged_v3_{model_size}_unfrz{unfreeze_encoder_blocks}_lr{learning_rate}_enc{encoder_lr}
     phase: 5
     enabled: false
-    description: Stage 2 sweep, DINOv2-{model_size}.
+    description: Stage 2 sweep, DINOv3-{model_size}.
     grid:
-      model_size: [s]
-      unfreeze_encoder_blocks: [0, 1, 2, 4]
+      model_size: [b]
+      unfreeze_encoder_blocks: [0, 2, 4]
       learning_rate: [1.0e-5, 1.0e-4]
       encoder_lr: [1.0e-6, 1.0e-5]
-    init_from: {experiment: P1_stage1_oldpenn_s, fold: 0}
+    init_from: {experiment: P3_stage1_oldpenn_v3_b, fold: 0}
     train:
+      model_name: DinoClassifierSliceV3
       penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
 
-  - id: P5_joint_{model_size}_lr{learning_rate}_enc{encoder_lr}
+  - id: P5_joint_v3_{model_size}_lr{learning_rate}_enc{encoder_lr}
     phase: 5
     enabled: false
-    description: Joint LR sweep.
+    description: Joint LR sweep, DINOv3-{model_size} (staged won; leave off).
     grid:
-      model_size: [s]
+      model_size: [b]
       learning_rate: [1.0e-6, 1.0e-5]
       encoder_lr: [1.0e-7, 1.0e-6]
     train:
+      model_name: DinoClassifierSliceV3
       penn_split_csv: joint_penn_datasplit_holdoutF0.csv
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
