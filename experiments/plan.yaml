@@ -442,8 +442,10 @@ experiments:
       loss: focal
 
   # ======================================================================
-  # Phase 5 — unfreeze / LR, DINOv3-B n32 MIP. Baseline is unfreeze 2,
-  # head 1e-5, encoder 1e-6 (P3_staged_v3_b). Drop unfreeze=1. Weighting ON.
+  # Phase 5 — unfreeze / LR, DINOv3-B n32 MIP. Main grid result: unfreeze 2,
+  # head 1e-5, encoder 1e-6 (P3_staged_v3_b, 0.7525) still best. Leftover
+  # cells (below): unfreeze 1 at those LRs, and head 1e-6 at unfreeze 2.
+  # Weighting ON. Do not rerun finished grid IDs.
   # ======================================================================
   - id: P5_staged_v3_{model_size}_unfrz{unfreeze_encoder_blocks}_lr{learning_rate}_enc{encoder_lr}
     phase: 5
@@ -454,6 +456,38 @@ experiments:
       unfreeze_encoder_blocks: [0, 2, 4]
       learning_rate: [1.0e-5, 1.0e-4]
       encoder_lr: [1.0e-6, 1.0e-5]
+    init_from: {experiment: P3_stage1_oldpenn_v3_b, fold: 0}
+    train:
+      model_name: DinoClassifierSliceV3
+      penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
+
+  - id: P5_staged_v3_{model_size}_unfrz{unfreeze_encoder_blocks}_lr{learning_rate}_enc{encoder_lr}
+    phase: 5
+    enabled: false
+    description: Unfreeze 1 at the frozen LRs (between 0 and 2).
+    grid:
+      model_size: [b]
+      unfreeze_encoder_blocks: [1]
+      learning_rate: [1.0e-5]
+      encoder_lr: [1.0e-6]
+    init_from: {experiment: P3_stage1_oldpenn_v3_b, fold: 0}
+    train:
+      model_name: DinoClassifierSliceV3
+      penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
+
+  - id: P5_staged_v3_{model_size}_unfrz{unfreeze_encoder_blocks}_lr{learning_rate}_enc{encoder_lr}
+    phase: 5
+    enabled: false
+    description: Smaller head LR at unfreeze 2 (boundary below 1e-5).
+    grid:
+      model_size: [b]
+      unfreeze_encoder_blocks: [2]
+      learning_rate: [1.0e-6]
+      encoder_lr: [1.0e-6]
     init_from: {experiment: P3_stage1_oldpenn_v3_b, fold: 0}
     train:
       model_name: DinoClassifierSliceV3
