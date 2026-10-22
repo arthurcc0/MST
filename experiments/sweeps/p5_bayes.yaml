@@ -52,5 +52,5 @@ command:
 # If Config on a selected run is missing unfreeze_encoder_blocks / learning_rate
 # / encoder_lr, the GP cannot use that run. New jobs log those keys. For old
 # P5 jobs, run:
-#   python scripts/experiments/tag_wandb_p5_config.py --entity <entity>
+#   python scripts/experiments/tag_wandb_p5_config.py
 # then create the sweep.

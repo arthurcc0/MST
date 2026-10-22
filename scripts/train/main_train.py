@@ -556,6 +556,7 @@ if __name__ == "__main__":
         "unfreeze_encoder_blocks": args.unfreeze_encoder_blocks,
         "learning_rate": args.learning_rate,
         "encoder_lr": args.encoder_lr,
+        "batch_size": args.batch_size,
         "fold": args.fold,
         "cohort": args.cohort,
     })

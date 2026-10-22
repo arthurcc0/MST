@@ -3,6 +3,7 @@
 W&B injects ``--unfreeze_encoder_blocks``, ``--learning_rate``, and
 ``--encoder_lr`` via ``${args}``. This script resolves the stage-1 ckpt and
 the rest of the frozen P5 recipe, then execs ``main_train.py``.
+Batch size stays 4 (ViT-B plan default); do not sweep it.
 """
 
 from __future__ import annotations
