@@ -4,14 +4,20 @@ Lightning did not log ``unfreeze_encoder_blocks`` / ``learning_rate`` as
 top-level config. This copies them from the run name (plan cohort tag) onto
 ``run.config``, which is what the W&B GP reads.
 
-    python scripts/experiments/tag_wandb_p5_config.py --entity <entity>
-    python scripts/experiments/tag_wandb_p5_config.py --entity <entity> --dry-run
+    python scripts/experiments/tag_wandb_p5_config.py --dry-run
+    python scripts/experiments/tag_wandb_p5_config.py
+
+``--entity`` is the W&B user or team that owns the project (the first
+path segment of wandb.ai/<entity>/Classifier_PENN_MST/...). Default: the
+logged-in account. This script only talks to the W&B API; it does not
+read local or cluster run folders.
 """
 
 from __future__ import annotations
 
 import argparse
 import re
+import sys
 
 import wandb
 
@@ -46,13 +52,22 @@ def hps_from_name(name: str) -> dict | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--entity", required=True)
+    parser.add_argument(
+        "--entity",
+        default=None,
+        help="W&B user or team that owns Classifier_PENN_MST. Default: logged-in account.",
+    )
     parser.add_argument("--project", default=PROJECT)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     api = wandb.Api()
-    path = f"{args.entity}/{args.project}"
+    entity = args.entity or api.default_entity
+    if not entity:
+        print("No W&B entity. Pass --entity or run wandb login.", file=sys.stderr)
+        return 2
+    path = f"{entity}/{args.project}"
+    print(f"project={path}")
     tagged = already = 0
     for run in api.runs(path):
         name = run.name or ""
