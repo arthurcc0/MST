@@ -1,0 +1,56 @@
+# Phase 5 Bayesian search (W&B). Fold 0 only. Confirm winners with plan.yaml
+# on all 5 inner folds; do not optimize test AUC.
+#
+# Create the sweep (pick one):
+#   1. UI — see comments at the bottom (seed from specific P5 fold-0 runs).
+#   2. CLI — wandb sweep -e <entity> experiments/sweeps/p5_bayes.yaml
+#      Attach prior runs: wandb sweep -e <entity> -R <run_id> -R <run_id> ...
+#
+# Then one GPU job per trial:
+#   sbatch --export=SWEEP=<entity>/Classifier_PENN_MST/<sweep_id> experiments/slurm/sweep90.sbatch
+#
+# Parameter names must match CLI flags AND wandb.config keys on prior runs.
+
+project: Classifier_PENN_MST
+name: P5_staged_v3_b_bayes
+method: bayes
+metric:
+  name: val/AUC_ROC
+  goal: maximize
+parameters:
+  unfreeze_encoder_blocks:
+    distribution: int_uniform
+    min: 0
+    max: 4
+  learning_rate:
+    distribution: log_uniform_values
+    min: 1.0e-6
+    max: 3.0e-5
+  encoder_lr:
+    distribution: log_uniform_values
+    min: 1.0e-7
+    max: 1.0e-5
+program: scripts/experiments/run_p5_sweep_trial.py
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args}
+
+# UI (seed the GP from finished P5 fold-0 runs):
+#   1. Project Classifier_PENN_MST → Runs table.
+#   2. Filter to fold 0 of the staged P5 grid (name contains P5_staged_v3_b
+#      and _f0). Also include P3_staged_v3_b_f0 (the frozen baseline).
+#      Skip joint, skip folds 1–4, skip unfinished runs.
+#   3. Tick those rows → Create sweep (dropdown on the table).
+#   4. Set method to bayes, metric val/AUC_ROC (maximize).
+#   5. Replace the auto-generated program/command/parameters with this file
+#      (the UI infers the old main_train.py command, which is wrong).
+#   6. Confirm "prior runs" still lists the rows you ticked.
+#   7. Initialize sweep, copy the sweep id, launch sweep90.sbatch agents.
+#
+# If Config on a selected run is missing unfreeze_encoder_blocks / learning_rate
+# / encoder_lr, the GP cannot use that run. New jobs log those keys. For old
+# P5 jobs, run:
+#   python scripts/experiments/tag_wandb_p5_config.py --entity <entity>
+# then create the sweep.

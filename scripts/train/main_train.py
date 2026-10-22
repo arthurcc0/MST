@@ -551,6 +551,14 @@ if __name__ == "__main__":
         name=f'{type(model).__name__}_{input_tag}{cohort_tag}{size_tag}{registers_tag}{slices_tag}',
         log_model=False,
     )
+    # Top-level keys so a W&B Bayesian sweep can seed from these runs.
+    logger.log_hyperparams({
+        "unfreeze_encoder_blocks": args.unfreeze_encoder_blocks,
+        "learning_rate": args.learning_rate,
+        "encoder_lr": args.encoder_lr,
+        "fold": args.fold,
+        "cohort": args.cohort,
+    })
     lr_monitor = LearningRateMonitor(logging_interval='step')
     early_stopping = EarlyStopping(
         monitor=to_monitor,
