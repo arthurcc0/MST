@@ -557,3 +557,60 @@ experiments:
       encoder_lr: 1.0e-6
       path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
       slices: 32
+
+  # ======================================================================
+  # Phase 8 — pretrain ablation on the frozen recipe (DINOv3-B n32 MIP,
+  # holdout F0 inner 5-fold). Outer rotate stays P7 (already submitted).
+  # Both-stages arm is P3_staged_v3_b; do not retrain it. Rank on val.
+  # ======================================================================
+  - id: P8_zeroshot_init_v3_b
+    phase: 8
+    enabled: false
+    description: Hub DINOv3-B + random fusion/head, no training (zero-shot init).
+    folds: [0]
+    eval: false
+    train:
+      model_name: DinoClassifierSliceV3
+      model_size: b
+      penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
+      max_epochs: 0
+
+  - id: P8_zeroshot_v3_b
+    phase: 8
+    enabled: false
+    description: Zero-shot hub init scored on new-Penn inner val.
+    eval_from: {experiment: P8_zeroshot_init_v3_b, fold: 0}
+    train:
+      model_name: DinoClassifierSliceV3
+      model_size: b
+      penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
+
+  - id: P8_stage1_only_v3_b
+    phase: 8
+    enabled: false
+    description: Old-Penn stage 1 only, scored on new-Penn inner val.
+    eval_from: {experiment: P3_stage1_oldpenn_v3_b, fold: 0}
+    train:
+      model_name: DinoClassifierSliceV3
+      model_size: b
+      penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
+
+  - id: P8_stage2_only_v3_b
+    phase: 8
+    enabled: false
+    description: New-Penn stage 2 from hub (no old-Penn stage 1).
+    train:
+      model_name: DinoClassifierSliceV3
+      model_size: b
+      penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32

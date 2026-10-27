@@ -348,6 +348,12 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        '--max_epochs',
+        type=int,
+        default=1000,
+        help='Lightning max_epochs (default: 1000). 0 saves the initialized model and skips fit (zero-shot init).',
+    )
+    parser.add_argument(
         '--seed',
         type=int,
         default=42,
@@ -440,6 +446,7 @@ if __name__ == "__main__":
             'focal_gamma': args.focal_gamma,
             'focal_alpha': args.focal_alpha,
             'seed': args.seed,
+            'max_epochs': args.max_epochs,
             'deterministic': args.deterministic,
             'precision': _resolve_train_precision(args.precision, args.model_name),
         }
@@ -520,6 +527,7 @@ if __name__ == "__main__":
     model_kwargs.pop('loss', None)
     model_kwargs.pop('focal_gamma', None)
     model_kwargs.pop('focal_alpha', None)
+    model_kwargs.pop('max_epochs', None)
 
     if args.learning_rate is not None:
         model_kwargs['optimizer_kwargs'] = {
@@ -588,7 +596,7 @@ if __name__ == "__main__":
         check_val_every_n_epoch=1,
         log_every_n_steps=log_every_n_steps,
         limit_val_batches=200,
-        max_epochs=1000,
+        max_epochs=args.max_epochs if args.max_epochs > 0 else 1,
         num_sanity_val_steps=2,
         logger=logger,
         deterministic=deterministic_mode,
@@ -634,22 +642,37 @@ if __name__ == "__main__":
         print(f"Trainable parameter tensors: encoder={enc_train}, head/MST={head_train}")
 
     # ---------------- Execute Training ----------------
-    # Pass ckpt_path=None because we have already loaded the weights
-    trainer.fit(model, datamodule=dm, ckpt_path=None)
+    if args.max_epochs <= 0:
+        init_ckpt = path_run_dir / "epoch=0-init.ckpt"
+        trainer.strategy.connect(model)
+        trainer.save_checkpoint(str(init_ckpt))
+        model.save_best_checkpoint(path_run_dir, init_ckpt)
+        stats = {
+            "epochs_ran": 0,
+            "last_epoch": -1,
+            "best_epoch": 0,
+            "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "",
+        }
+        (path_run_dir / "training_stats.json").write_text(
+            json.dumps(stats, indent=2), encoding="utf-8",
+        )
+    else:
+        # Pass ckpt_path=None because we have already loaded the weights
+        trainer.fit(model, datamodule=dm, ckpt_path=None)
 
-    best_path = checkpointing.best_model_path or ""
-    best_epoch_m = re.search(r"epoch[=-](\d+)", Path(best_path).name)
-    stats = {
-        "epochs_ran": int(trainer.current_epoch) + 1,
-        "last_epoch": int(trainer.current_epoch),
-        "best_epoch": int(best_epoch_m.group(1)) if best_epoch_m else None,
-        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "",
-    }
-    (path_run_dir / "training_stats.json").write_text(
-        json.dumps(stats, indent=2), encoding="utf-8",
-    )
+        best_path = checkpointing.best_model_path or ""
+        best_epoch_m = re.search(r"epoch[=-](\d+)", Path(best_path).name)
+        stats = {
+            "epochs_ran": int(trainer.current_epoch) + 1,
+            "last_epoch": int(trainer.current_epoch),
+            "best_epoch": int(best_epoch_m.group(1)) if best_epoch_m else None,
+            "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "",
+        }
+        (path_run_dir / "training_stats.json").write_text(
+            json.dumps(stats, indent=2), encoding="utf-8",
+        )
 
-    # ------------- Save path to best model -------------
-    model.save_best_checkpoint(path_run_dir, checkpointing.best_model_path)
+        # ------------- Save path to best model -------------
+        model.save_best_checkpoint(path_run_dir, checkpointing.best_model_path)
 
     wandb.finish(quiet=True)
