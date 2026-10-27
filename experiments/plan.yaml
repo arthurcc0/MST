@@ -532,3 +532,28 @@ experiments:
       penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
       path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
       slices: 32
+
+  # ======================================================================
+  # Phase 7 — outer-holdout rotate of the frozen recipe (unfreeze 2, head
+  # 1e-5, encoder 1e-6, seed 123). Holdout 0 is P3_staged_v3_b; do not
+  # retrain it. Same P3_stage1_oldpenn_v3_b ckpt. Rank/report: pool the
+  # five disjoint holdout test predictions (mean of 5 inner-fold probs
+  # per exam). Do not pick an inner fold on test AUC.
+  # ======================================================================
+  - id: P7_staged_v3_b_holdoutF{holdout_fold}
+    phase: 7
+    enabled: false
+    description: Frozen recipe, outer holdout F{holdout_fold} + inner 5-fold.
+    vars:
+      holdout_fold: [1, 2, 3, 4]
+    init_from: {experiment: P3_stage1_oldpenn_v3_b, fold: 0}
+    eval:
+      splits: [val, test]
+    train:
+      model_name: DinoClassifierSliceV3
+      penn_split_csv: new_penn_datasplit_v5_holdoutF{holdout_fold}.csv
+      unfreeze_encoder_blocks: 2
+      learning_rate: 1.0e-5
+      encoder_lr: 1.0e-6
+      path_root_data: final_cropped_and_masked_slabs_n32_s3_o0
+      slices: 32
