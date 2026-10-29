@@ -549,6 +549,7 @@ experiments:
       splits: [val, test]
     train:
       model_name: DinoClassifierSliceV3
+      model_size: b
       penn_split_csv: new_penn_datasplit_v5_holdoutF0.csv
       unfreeze_encoder_blocks: 2
       learning_rate: 1.0e-5
@@ -567,6 +568,7 @@ experiments:
       splits: [val, test]
     train:
       model_name: DinoClassifierSliceV3
+      model_size: b
       penn_split_csv: new_penn_datasplit_v5_holdoutF{holdout_fold}.csv
       unfreeze_encoder_blocks: 2
       learning_rate: 1.0e-5
